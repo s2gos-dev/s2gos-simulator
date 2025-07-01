@@ -2,7 +2,7 @@
 
 # Import backends with optional dependencies
 try:
-    from .eradiate import EradiateSimulator
+    from .eradiate_backend import EradiateBackend as EradiateSimulator
     ERADIATE_AVAILABLE = True
 except ImportError:
     ERADIATE_AVAILABLE = False
