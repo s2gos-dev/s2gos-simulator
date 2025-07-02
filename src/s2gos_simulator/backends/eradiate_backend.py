@@ -1,9 +1,10 @@
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 import numpy as np
+import xarray as xr
 from PIL import Image
 
-from .base import SimulationBackend, SimulationResult
+from .base import SimulationBackend
 
 try:
     import eradiate
@@ -32,7 +33,6 @@ class EradiateBackend(SimulationBackend):
         super().__init__(render_config)
         
         if ERADIATE_AVAILABLE:
-            # Set Eradiate mode early to avoid Mitsuba variant issues
             eradiate.set_mode("mono")
     
     def is_available(self) -> bool:
@@ -40,7 +40,8 @@ class EradiateBackend(SimulationBackend):
         return ERADIATE_AVAILABLE
     
     def run_simulation(self, scene_config, scene_dir: Path, 
-                      output_dir: Optional[Path] = None) -> SimulationResult:
+                      output_dir: Optional[Path] = None, plot_image: bool=False,
+                      id_to_plot: str="rgb_camera") -> xr.Dataset:
         """Run complete Eradiate simulation pipeline.
         
         Args:
@@ -49,13 +50,11 @@ class EradiateBackend(SimulationBackend):
             output_dir: Directory for simulation outputs (defaults to scene_dir/eradiate_renders)
             
         Returns:
-            SimulationResult with paths to outputs and status information
+            xarray.Dataset containing simulation results. The dataset is also saved to NetCDF
+            and the file path is stored in the 'saved_to' attribute.
         """
         if not self.is_available():
-            return SimulationResult(
-                success=False,
-                error="Eradiate is not available. Install with: pip install eradiate[kernel]"
-            )
+            raise RuntimeError("Eradiate is not available. Install with: pip install eradiate[kernel]")
         
         if output_dir is None:
             output_dir = scene_dir / "eradiate_renders"
@@ -71,26 +70,33 @@ class EradiateBackend(SimulationBackend):
         if scene_config.background:
             print(f"Background: {scene_config.background['material']} at {scene_config.background['elevation']:.1f}m")
         
-        try:
-            # Create the complete experiment
-            experiment = self._create_experiment(scene_config, scene_dir)
+        # Create the complete experiment
+        experiment = self._create_experiment(scene_config, scene_dir)
+        
+        print("Running Eradiate simulation (this may take several minutes)...")
+        eradiate.run(experiment)
+        
+        if plot_image:
+            # Create RGB visualization
+            img = dataarray_to_rgb(
+                experiment.results[id_to_plot]["radiance"],
+                channels=[("w", 660), ("w", 550), ("w", 440)],
+                normalize=False,
+            ) * 1.8
             
-            print("Running Eradiate simulation (this may take several minutes)...")
-            eradiate.run(experiment)
+            img = np.clip(img, 0, 1)
             
-            # Process and save results
-            return self._process_results(experiment, output_dir)
+            # Save RGB image
+            rgb_output = output_dir / "eradiate_rgb.png"
+            plt_img = (img * 255).astype(np.uint8)
+            rgb_image = Image.fromarray(plt_img)
+            rgb_image.save(rgb_output)
             
-        except Exception as e:
-            print(f"Eradiate simulation failed: {e}")
-            import traceback
-            traceback.print_exc()
-            
-            return SimulationResult(
-                success=False,
-                error=str(e),
-                output_dir=output_dir
-            )
+            print(f"Eradiate simulation complete!")
+            print(f"RGB visualization: {rgb_output}")
+        
+        # Process and save results
+        return self._process_results(experiment, output_dir)
     
     def validate_scene(self, scene_config, scene_dir: Path) -> List[str]:
         """Validate scene configuration for Eradiate backend."""
@@ -152,10 +158,8 @@ class EradiateBackend(SimulationBackend):
             aerosol_ds=scene_config.atmosphere.get("aerosol_ds", "sixsv-continental")
         )
         
-        # Create illumination from render config
         illumination = self._create_illumination_config()
         
-        # Create measures from render config sensors
         measures = []
         for sensor in self.render_config.sensors:
             measures.append(self._create_measure_config(sensor))
@@ -318,48 +322,84 @@ class EradiateBackend(SimulationBackend):
             }
         }
     
-    def _process_results(self, experiment, output_dir: Path) -> SimulationResult:
-        """Process simulation results and save outputs."""
-        # Save raw results - use first measure ID as default
-        raw_output = output_dir / "eradiate_results.nc"
-        measure_ids = list(experiment.results.keys())
-        if not measure_ids:
-            raise ValueError("No results found in experiment")
+    def _process_results(self, experiment, output_dir: Path) -> xr.Dataset:
+        """
+        Process simulation results, save each sensor to a separate netCDF file,
+        and optionally create a combined Dataset.
         
-        # Use first available measure
-        primary_measure_id = measure_ids[0]
-        results_ds = experiment.results[primary_measure_id]
-        results_ds.to_netcdf(raw_output)
+        This method handles cases where results are a single Dataset or a 
+        dictionary of Datasets keyed by sensor ID. When multiple sensors are
+        present, each sensor's results are saved to individual netCDF files.
+        """
+        results = experiment.results
+
+        if not results:
+            raise ValueError("No results found in experiment.")
+
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
         
-        # Create RGB visualization
-        img = dataarray_to_rgb(
-            results_ds["radiance"],
-            channels=[("w", 660), ("w", 550), ("w", 440)],
-            normalize=False,
-        ) * 1.8
+        saved_files = []
+
+        if isinstance(results, dict):
+            print(f"Found a dictionary of results with {len(results)} sensors.")
+            print("Saving each sensor to separate netCDF files...")
+            
+            datasets = list(results.values())
+            sensor_ids = list(results.keys())
+            
+            # Save each sensor's results to separate files
+            for sensor_id, dataset in results.items():
+                sensor_output = output_dir / f"eradiate_results_{sensor_id}.nc"
+                
+                # Add metadata to individual dataset
+                dataset.attrs['sensor_id'] = sensor_id
+                dataset.attrs['saved_to'] = str(sensor_output)
+                dataset.attrs['output_dir'] = str(output_dir)
+                dataset.attrs['backend'] = 'eradiate'
+                
+                dataset.to_netcdf(sensor_output)
+                saved_files.append(sensor_output)
+                print(f"  Sensor '{sensor_id}' saved to {sensor_output}")
+            
+            # Create concatenated dataset for return value
+            try:
+                results_ds = xr.concat(datasets, dim="sensor_id", compat='override')
+                results_ds = results_ds.assign_coords(sensor_id=sensor_ids)
+                
+                # Also save combined file for backward compatibility
+                combined_output = output_dir / "eradiate_results_combined.nc"
+                results_ds.to_netcdf(combined_output)
+                saved_files.append(combined_output)
+                print(f"  Combined results saved to {combined_output}")
+            except Exception as e:
+                print(f"  Warning: Could not create combined file due to incompatible coordinates: {e}")
+                # Return the first dataset as fallback
+                results_ds = datasets[0]
+                results_ds.attrs['note'] = f"Combined file could not be created - using {sensor_ids[0]} dataset"
+
+        elif isinstance(results, xr.Dataset):
+            print("Found a single results Dataset.")
+            results_ds = results
+            
+            # Save single dataset
+            raw_output = output_dir / "eradiate_results.nc"
+            results_ds.to_netcdf(raw_output)
+            saved_files.append(raw_output)
+            print(f"Results successfully saved to {raw_output}")
+            
+        else:
+            raise TypeError(
+                f"Unsupported experiment results type: {type(results)}. "
+                "Expected xr.Dataset or Dict[str, xr.Dataset]."
+            )
         
-        img = np.clip(img, 0, 1)
+        # Update return dataset attributes
+        results_ds.attrs['saved_files'] = [str(f) for f in saved_files]
+        results_ds.attrs['output_dir'] = str(output_dir)
+        results_ds.attrs['backend'] = 'eradiate'
         
-        # Save RGB image
-        rgb_output = output_dir / "eradiate_rgb.png"
-        plt_img = (img * 255).astype(np.uint8)
-        rgb_image = Image.fromarray(plt_img)
-        rgb_image.save(rgb_output)
-        
-        print(f"Eradiate simulation complete!")
-        print(f"Raw results: {raw_output}")
-        print(f"RGB visualization: {rgb_output}")
-        
-        return SimulationResult(
-            success=True,
-            raw_results=raw_output,
-            rgb_image=rgb_output,
-            output_dir=output_dir,
-            metadata={
-                "backend": "eradiate",
-                "experiment": experiment
-            }
-        )
+        return results_ds
     
     def _create_illumination_config(self) -> Dict[str, Any]:
         """Create illumination configuration for Eradiate."""

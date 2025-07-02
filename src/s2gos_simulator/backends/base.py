@@ -1,27 +1,8 @@
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Optional, List
 
-
-@dataclass
-class SimulationResult:
-    """Standard result format for all simulation backends.
-    
-    Attributes:
-        success: Whether the simulation completed successfully
-        raw_results: Path to raw simulation output file (e.g., NetCDF)
-        rgb_image: Path to RGB visualization image (if created)
-        output_dir: Directory containing all simulation outputs
-        error: Error message if simulation failed
-        metadata: Additional backend-specific metadata
-    """
-    success: bool
-    raw_results: Optional[Path] = None
-    rgb_image: Optional[Path] = None  
-    output_dir: Optional[Path] = None
-    error: Optional[str] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
+import xarray as xr
 
 
 class SimulationBackend(ABC):
@@ -53,7 +34,8 @@ class SimulationBackend(ABC):
     
     @abstractmethod
     def run_simulation(self, scene_config, scene_dir: Path, 
-                      output_dir: Optional[Path] = None) -> SimulationResult:
+                      output_dir: Optional[Path] = None, plot_image: bool=False,
+                      id_to_plot: str="rgb_camera") -> xr.Dataset:
         """Run complete simulation pipeline.
         
         This is the main entry point for running simulations. Implementations
@@ -69,7 +51,9 @@ class SimulationBackend(ABC):
             output_dir: Directory for simulation outputs (optional)
             
         Returns:
-            SimulationResult with paths to outputs and status information
+            xarray.Dataset containing simulation results. If output_dir is provided,
+            the dataset is also saved to a NetCDF file and the file path is stored
+            in the dataset's 'saved_to' attribute.
         """
         pass
     
