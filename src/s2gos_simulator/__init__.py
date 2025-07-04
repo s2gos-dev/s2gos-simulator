@@ -16,8 +16,8 @@ from .srf import (
     srf_rgb, srf_visible, srf_nir, srf_multispectral
 )
 
-# New config_v2 system (recommended)
-from .config_v2 import (
+# New config system (recommended)
+from .config import (
     SimulationConfig,
     SatelliteSensor, UAVSensor, GroundSensor,
     DirectionalIllumination as DirectionalIlluminationV2,
@@ -29,7 +29,7 @@ from .config_v2 import (
 
 # Import backends with optional dependencies
 from .backends import EradiateSimulator, ERADIATE_AVAILABLE
-from .backends.eradiate_backend_v2 import EradiateBackendV2
+from .backends.eradiate_backend import EradiateBackend
 
 __version__ = "0.1.0"
 
@@ -80,6 +80,6 @@ __all__ = [
     
     # Backends
     "EradiateSimulator",
-    "EradiateBackendV2",
+    "EradiateBackend",
     "ERADIATE_AVAILABLE"
 ]

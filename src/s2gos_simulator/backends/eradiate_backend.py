@@ -1,10 +1,16 @@
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Union
 import numpy as np
 import xarray as xr
 from PIL import Image
 
 from .base import SimulationBackend
+from ..config import (
+    SimulationConfig, SatelliteSensor, UAVSensor, GroundSensor,
+    DirectionalIllumination, ConstantIllumination, MeasurementType,
+    PlatformType, AngularViewing, AngularFromOriginViewing, LookAtViewing, HemisphericalViewing,
+    UAVInstrumentType, GroundInstrumentType, SatellitePlatform, SatelliteInstrument
+)
 
 try:
     import eradiate
@@ -18,19 +24,13 @@ except ImportError:
 
 
 class EradiateBackend(SimulationBackend):
-    """Unified Eradiate backend for radiative transfer simulations.
-    
-    This backend consolidates all Eradiate functionality into a single class,
-    handling scene setup, surface creation, simulation execution, and result processing.
+    """
+    Enhanced Eradiate backend for the new configuration system.
     """
     
-    def __init__(self, render_config):
-        """Initialize the Eradiate backend.
-        
-        Args:
-            render_config: Rendering configuration (sensors, illumination)
-        """
-        super().__init__(render_config)
+    def __init__(self, simulation_config: SimulationConfig):
+        """Initialize the Eradiate backend with new configuration system."""
+        super().__init__(simulation_config)
         
         if ERADIATE_AVAILABLE:
             eradiate.set_mode("mono")
@@ -39,22 +39,71 @@ class EradiateBackend(SimulationBackend):
         """Check if Eradiate dependencies are available."""
         return ERADIATE_AVAILABLE
     
-    def run_simulation(self, scene_config, scene_dir: Path, 
-                      output_dir: Optional[Path] = None, plot_image: bool=False,
-                      id_to_plot: str="rgb_camera") -> xr.Dataset:
-        """Run complete Eradiate simulation pipeline.
+    @property
+    def supported_platforms(self) -> List[str]:
+        """Eradiate supports all platform types."""
+        return ["satellite", "uav", "ground"]
+    
+    @property
+    def supported_measurements(self) -> List[str]:
+        """Measurement types supported by Eradiate."""
+        return ["radiance", "brf", "hdrf", "bhr", "bhr_iso", "farar", "flux_3d"]
+    
+    def validate_configuration(self) -> List[str]:
+        """Validate configuration for Eradiate backend."""
+        errors = super().validate_configuration()
         
-        Args:
-            scene_config: Scene configuration from s2gos_generator
-            scene_dir: Directory containing scene assets
-            output_dir: Directory for simulation outputs (defaults to scene_dir/eradiate_renders)
-            
-        Returns:
-            xarray.Dataset containing simulation results. The dataset is also saved to NetCDF
-            and the file path is stored in the 'saved_to' attribute.
-        """
         if not self.is_available():
-            raise RuntimeError("Eradiate is not available. Install with: pip install eradiate[kernel]")
+            errors.append("Eradiate is not available. Install with: pip install eradiate[kernel]")
+        
+        for sensor in self.simulation_config.sensors:
+            if sensor.platform_type == PlatformType.SATELLITE:
+                validation_error = self._validate_satellite_sensor(sensor)
+                if validation_error:
+                    errors.append(validation_error)
+            elif sensor.platform_type == PlatformType.GROUND:
+                if sensor.instrument not in [GroundInstrumentType.HYPSTAR, GroundInstrumentType.PERSPECTIVE_CAMERA, 
+                                           GroundInstrumentType.PYRANOMETER, GroundInstrumentType.FLUX_METER, 
+                                           GroundInstrumentType.DHP_CAMERA]:
+                    errors.append(f"Ground sensor {sensor.id} instrument type {sensor.instrument} is not supported")
+        
+        return errors
+    
+    def _validate_satellite_sensor(self, sensor) -> Optional[str]:
+        """Validate satellite sensor platform/instrument/band combination using enum system."""
+        from ..config import PLATFORM_INSTRUMENTS, INSTRUMENT_BANDS, SatellitePlatform, SatelliteInstrument
+        
+        if sensor.platform == SatellitePlatform.CUSTOM:
+            if sensor.srf is None:
+                return f"Custom platform requires explicit SRF configuration"
+            return None
+        
+        try:
+            platform_enum = SatellitePlatform(sensor.platform)
+            instrument_enum = SatelliteInstrument(sensor.instrument)
+        except ValueError as e:
+            return f"Invalid platform or instrument: {e}"
+        
+        valid_instruments = PLATFORM_INSTRUMENTS.get(platform_enum, [])
+        if instrument_enum not in valid_instruments:
+            return f"Platform '{sensor.platform}' does not support instrument '{sensor.instrument}'. Valid instruments: {[inst.value for inst in valid_instruments]}"
+        
+        band_enum_class = INSTRUMENT_BANDS.get(instrument_enum)
+        if band_enum_class is not None:
+            try:
+                band_enum_class(sensor.band)
+            except ValueError:
+                valid_bands = [band.value for band in band_enum_class]
+                return f"Instrument '{sensor.platform}/{sensor.instrument}' does not support band '{sensor.band}'. Valid bands: {valid_bands}"
+        
+        return None
+    
+    def run_simulation(self, scene_config, scene_dir: Path, 
+                      output_dir: Optional[Path] = None, 
+                      **kwargs) -> xr.Dataset:
+        """Run Eradiate simulation with new configuration system."""
+        if not self.is_available():
+            raise RuntimeError("Eradiate is not available")
         
         if output_dir is None:
             output_dir = scene_dir / "eradiate_renders"
@@ -62,85 +111,33 @@ class EradiateBackend(SimulationBackend):
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         
-        print(f"Rendering scene '{scene_config.name}' with Eradiate...")
-        print(f"Scene location: {scene_config.metadata.center_lat}, {scene_config.metadata.center_lon}")
-        print(f"Target: {scene_config.target['mesh']} + {scene_config.target['selection_texture']}")
-        if scene_config.buffer:
-            print(f"Buffer: {scene_config.buffer['mesh']} + {scene_config.buffer['selection_texture']}")
-        if scene_config.background:
-            print(f"Background: {scene_config.background['material']} at {scene_config.background['elevation']:.1f}m")
+        print(f"Running Eradiate simulation: {self.simulation_config.name}")
+        print(f"Sensors: {len(self.simulation_config.sensors)}")
+        print(f"Measurement types: {[mt.value for mt in self.simulation_config.output_quantities]}")
         
-        # Create the complete experiment
+        
         experiment = self._create_experiment(scene_config, scene_dir)
         
-        print("Running Eradiate simulation (this may take several minutes)...")
+        print("Executing Eradiate simulation...")
         eradiate.run(experiment)
         
+        plot_image = kwargs.get('plot_image', False)
         if plot_image:
-            # Create RGB visualization
-            img = dataarray_to_rgb(
-                experiment.results[id_to_plot]["radiance"],
-                channels=[("w", 660), ("w", 550), ("w", 440)],
-                normalize=False,
-            ) * 1.8
-            
-            img = np.clip(img, 0, 1)
-            
-            # Save RGB image
-            rgb_output = output_dir / "eradiate_rgb.png"
-            plt_img = (img * 255).astype(np.uint8)
-            rgb_image = Image.fromarray(plt_img)
-            rgb_image.save(rgb_output)
-            
-            print(f"Eradiate simulation complete!")
-            print(f"RGB visualization: {rgb_output}")
+            self._create_rgb_visualization(experiment, output_dir, kwargs.get('id_to_plot', 'rgb_camera'))
         
-        # Process and save results
         return self._process_results(experiment, output_dir)
     
-    def validate_scene(self, scene_config, scene_dir: Path) -> List[str]:
-        """Validate scene configuration for Eradiate backend."""
-        errors = []
-        
-        # Check required files exist
-        target_mesh = scene_dir / scene_config.target["mesh"]
-        if not target_mesh.exists():
-            errors.append(f"Target mesh not found: {target_mesh}")
-        
-        target_texture = scene_dir / scene_config.target["selection_texture"]
-        if not target_texture.exists():
-            errors.append(f"Target texture not found: {target_texture}")
-        
-        if scene_config.buffer:
-            buffer_mesh = scene_dir / scene_config.buffer["mesh"]
-            if not buffer_mesh.exists():
-                errors.append(f"Buffer mesh not found: {buffer_mesh}")
-                
-            buffer_texture = scene_dir / scene_config.buffer["selection_texture"]
-            if not buffer_texture.exists():
-                errors.append(f"Buffer texture not found: {buffer_texture}")
-        
-        if scene_config.background and "mask_texture" in scene_config.background:
-            bg_mask = scene_dir / scene_config.background["mask_texture"]
-            if not bg_mask.exists():
-                errors.append(f"Background mask not found: {bg_mask}")
-        
-        return errors
-    
     def _create_experiment(self, scene_config, scene_dir: Path):
-        """Create an Eradiate experiment from scene configuration."""
-        # Import here to avoid circular imports
+        """Create Eradiate experiment from new configuration system."""
         try:
             from s2gos_generator.materials.registry import MaterialRegistry
             from s2gos_generator.assets.atmosphere import create_atmosphere
         except ImportError as e:
-            raise ImportError(f"s2gos_generator is required for scene materials and atmosphere: {e}")
+            raise ImportError(f"s2gos_generator is required: {e}")
         
-        # Create materials
         materials = scene_config.materials
         kdict, kpmap = MaterialRegistry.create_material_kdict_kpmap(materials)
         
-        # Create surfaces
         kdict.update(self._create_target_surface(scene_config, scene_dir))
         
         if scene_config.buffer:
@@ -149,21 +146,12 @@ class EradiateBackend(SimulationBackend):
         if scene_config.background:
             kdict.update(self._create_background_surface(scene_config, scene_dir))
         
-        # Create atmosphere from scene config
-        atmosphere = create_atmosphere(
-            boa=scene_config.atmosphere.get("boa", 0.0),
-            toa=scene_config.atmosphere.get("toa", 40.0e3),
-            aerosol_ot=scene_config.atmosphere.get("aerosol_ot", 0.1),
-            aerosol_scale=scene_config.atmosphere.get("aerosol_scale", 1e3),
-            aerosol_ds=scene_config.atmosphere.get("aerosol_ds", "sixsv-continental")
-        )
+        atmosphere = self._create_atmosphere_from_config(scene_config)
         
-        illumination = self._create_illumination_config()
+        illumination = self._translate_illumination()
         
-        measures = []
-        for sensor in self.render_config.sensors:
-            measures.append(self._create_measure_config(sensor))
-        print(measures)
+        measures = self._translate_sensors()
+        
         return AtmosphereExperiment(
             geometry={"type": "plane_parallel", "toa_altitude": 40.0 * ureg.km},
             atmosphere=atmosphere,
@@ -174,8 +162,307 @@ class EradiateBackend(SimulationBackend):
             kpmap=kpmap
         )
     
+    def _create_atmosphere_from_config(self, scene_config):
+        """Create atmosphere based on the configuration mode."""
+        try:
+            from s2gos_generator.assets.atmosphere import create_atmosphere
+            from s2gos_generator.core.config import AtmosphereMode
+        except ImportError as e:
+            raise ImportError(f"s2gos_generator atmosphere assets required: {e}")
+        
+        # Handle both legacy (dict) and new (Pydantic) atmosphere configs
+        if hasattr(scene_config, 'atmosphere') and hasattr(scene_config.atmosphere, 'mode'):
+            # New Pydantic configuration
+            atm_config = scene_config.atmosphere
+            
+            if atm_config.mode == AtmosphereMode.PRESET:
+                return create_atmosphere(
+                    boa=atm_config.boa,
+                    toa=atm_config.toa,
+                    aerosol_ot=atm_config.aerosol_ot,
+                    aerosol_scale=atm_config.aerosol_scale,
+                    aerosol_ds=atm_config.aerosol_ds.value
+                )
+            
+            elif atm_config.mode == AtmosphereMode.DATASET:
+                # Use specific Eradiate datasets
+                return self._create_atmosphere_from_datasets(atm_config)
+            
+            elif atm_config.mode == AtmosphereMode.CUSTOM:
+                # Use custom molecular/particle layers
+                return self._create_atmosphere_from_custom_layers(atm_config)
+            
+            elif atm_config.mode == AtmosphereMode.RAW:
+                # Use raw Eradiate configuration
+                return atm_config.raw_config
+            
+            else:
+                raise ValueError(f"Unsupported atmosphere mode: {atm_config.mode}")
+        
+        else:
+            # Legacy configuration (dict-based)
+            atmosphere = scene_config.atmosphere if hasattr(scene_config, 'atmosphere') else {}
+            return create_atmosphere(
+                boa=atmosphere.get("boa", 0.0),
+                toa=atmosphere.get("toa", 40.0e3),
+                aerosol_ot=atmosphere.get("aerosol_ot", 0.1),
+                aerosol_scale=atmosphere.get("aerosol_scale", 1e3),
+                aerosol_ds=atmosphere.get("aerosol_ds", "sixsv-continental")
+            )
+    
+    def _create_atmosphere_from_datasets(self, atm_config):
+        """Create atmosphere using specific Eradiate datasets."""
+        # This would be implemented based on Eradiate's dataset loading capabilities
+        # For now, fall back to basic configuration
+        aerosol_ds = atm_config.aerosol_dataset.value if atm_config.aerosol_dataset else "sixsv-continental"
+        
+        try:
+            from s2gos_generator.assets.atmosphere import create_atmosphere
+            return create_atmosphere(
+                boa=atm_config.boa,
+                toa=atm_config.toa,
+                aerosol_ot=0.1,  # Default value
+                aerosol_scale=1000.0,  # Default value
+                aerosol_ds=aerosol_ds
+            )
+        except ImportError as e:
+            raise ImportError(f"s2gos_generator atmosphere assets required: {e}")
+    
+    def _create_atmosphere_from_custom_layers(self, atm_config):
+        """Create atmosphere using custom molecular/particle layers."""
+        # This would be implemented to create custom Eradiate atmosphere
+        # For now, fall back to basic configuration
+        try:
+            from s2gos_generator.assets.atmosphere import create_atmosphere
+            return create_atmosphere(
+                boa=atm_config.boa,
+                toa=atm_config.toa,
+                aerosol_ot=0.1,  # Default value
+                aerosol_scale=1000.0,  # Default value  
+                aerosol_ds="sixsv-continental"  # Default dataset
+            )
+        except ImportError as e:
+            raise ImportError(f"s2gos_generator atmosphere assets required: {e}")
+    
+    def _translate_illumination(self) -> Dict[str, Any]:
+        """Translate generic illumination to Eradiate format."""
+        illumination = self.simulation_config.illumination
+        
+        if isinstance(illumination, DirectionalIllumination):
+            return {
+                "type": "directional",
+                "id": illumination.id,
+                "zenith": illumination.zenith * ureg.deg,
+                "azimuth": illumination.azimuth * ureg.deg,
+                "irradiance": {
+                    "type": "solar_irradiance",
+                    "dataset": illumination.irradiance_dataset
+                }
+            }
+        elif isinstance(illumination, ConstantIllumination):
+            return {
+                "type": "constant",
+                "id": illumination.id,
+                "radiance": illumination.radiance
+            }
+        else:
+            raise ValueError(f"Unsupported illumination type: {type(illumination)}")
+    
+    def _calculate_target_from_angles(self, view: AngularFromOriginViewing) -> tuple[list[float], list[float]]:
+        """
+        Calculates a target point and direction vector from an AngularFromOriginViewing object.
+        
+        Returns:
+            A tuple containing (target_position, direction_vector).
+        """
+        zen_rad = np.deg2rad(view.zenith)
+        az_rad = np.deg2rad(view.azimuth)
+        
+        direction = np.array([
+            np.sin(zen_rad) * np.cos(az_rad),
+            np.sin(zen_rad) * np.sin(az_rad),
+            np.cos(zen_rad)
+        ])
+        
+        origin_vec = np.array(view.origin)
+        target_vec = origin_vec + direction
+        
+        return target_vec.tolist(), direction.tolist()
+
+    def _translate_sensors(self) -> List[Dict[str, Any]]:
+        """Translate generic sensors to Eradiate measures."""
+        measures = []
+        for sensor in self.simulation_config.sensors:
+            if isinstance(sensor, SatelliteSensor):
+                measures.append(self._translate_satellite_sensor(sensor))
+            elif isinstance(sensor, UAVSensor):
+                measures.append(self._translate_uav_sensor(sensor))
+            elif isinstance(sensor, GroundSensor):
+                measures.append(self._translate_ground_sensor(sensor))
+            else:
+                raise ValueError(f"Unsupported sensor type: {type(sensor)}")
+        return measures
+
+    def _translate_satellite_sensor(self, sensor: SatelliteSensor) -> Dict[str, Any]:
+        """Translate satellite sensor to Eradiate measure."""
+        measure_config = {
+            "type": "distant",
+            "id": sensor.id,
+            "spp": sensor.samples_per_pixel,
+            "srf": self._translate_srf(sensor.srf),
+            "construct": "from_angles",
+            "angles": [sensor.viewing.zenith, sensor.viewing.azimuth]
+        }
+        
+        if sensor.viewing.target:
+            measure_config["target"] = sensor.viewing.target
+        
+        return measure_config
+
+    def _translate_uav_sensor(self, sensor: UAVSensor) -> Dict[str, Any]:
+        """Translate UAV sensor to Eradiate measure."""
+        view = sensor.viewing
+
+        base_config = {
+            "id": sensor.id,
+            "spp": sensor.samples_per_pixel,
+            "srf": self._translate_srf(sensor.srf),
+            "origin": view.origin,
+        }
+
+        if sensor.instrument == UAVInstrumentType.PERSPECTIVE_CAMERA:
+            base_config["type"] = "perspective"
+            base_config["fov"] = sensor.fov or 70.0
+            base_config["film_resolution"] = sensor.resolution or [1024, 1024]
+            
+            if isinstance(view, LookAtViewing):
+                base_config["target"] = view.target
+                base_config["up"] = view.up or [0, 0, 1]
+            elif isinstance(view, AngularFromOriginViewing):
+                target, _ = self._calculate_target_from_angles(view)
+                base_config["target"] = target
+                base_config["up"] = view.up or [0, 0, 1]
+
+        elif sensor.instrument == UAVInstrumentType.RADIANCEMETER:
+            base_config["type"] = "radiancemeter"
+            
+            if isinstance(view, LookAtViewing):
+                base_config["target"] = view.target
+            elif isinstance(view, AngularFromOriginViewing):
+                target, _ = self._calculate_target_from_angles(view)
+                base_config["target"] = target
+        
+        else:
+            raise ValueError(f"Unsupported UAV instrument type: {sensor.instrument}")
+
+        return base_config
+
+    def _translate_ground_sensor(self, sensor: GroundSensor) -> Dict[str, Any]:
+        """Translate ground sensor to Eradiate measure."""
+        view = sensor.viewing
+
+        base_measure = {
+            "id": sensor.id,
+            "spp": sensor.samples_per_pixel,
+            "srf": self._translate_srf(sensor.srf),
+        }
+
+        if isinstance(view, HemisphericalViewing):
+            base_measure["type"] = "hdistant"
+            base_measure["direction"] = [0, 0, 1] if view.upward_looking else [0, 0, -1]
+            
+        elif isinstance(view, (LookAtViewing, AngularFromOriginViewing)):
+            base_measure["origin"] = view.origin
+
+            if sensor.instrument in [GroundInstrumentType.PERSPECTIVE_CAMERA, GroundInstrumentType.DHP_CAMERA]:
+                base_measure["type"] = "perspective"
+                base_measure["film_resolution"] = [1024, 1024]
+                base_measure["fov"] = 180.0 if sensor.instrument == GroundInstrumentType.DHP_CAMERA else 70.0
+                base_measure["up"] = view.up or [0, 0, 1]
+            else:
+                base_measure["type"] = "radiancemeter"
+
+            if isinstance(view, LookAtViewing):
+                base_measure["target"] = view.target
+                
+            elif isinstance(view, AngularFromOriginViewing):
+                target, _ = self._calculate_target_from_angles(view)
+                base_measure["target"] = target
+        else:
+            raise ValueError(f"Unsupported viewing type for ground sensor: {type(view)}")
+
+        return base_measure
+        
+    def _translate_srf(self, srf) -> Union[Dict[str, Any], str]:
+        """Translate generic SRF to Eradiate format."""
+        if srf is None:
+            return {
+                "type": "uniform",
+                "wmin": 400.0,
+                "wmax": 700.0,
+                "value": 1.0
+            }
+        elif isinstance(srf, str):
+            return srf
+        elif isinstance(srf, dict):
+            return srf
+        else:
+            # From config
+            if srf.type == "delta":
+                return {
+                    "type": "delta",
+                    "wavelengths": srf.wavelengths
+                }
+            elif srf.type == "uniform":
+                return {
+                    "type": "uniform",
+                    "wmin": srf.wmin,
+                    "wmax": srf.wmax,
+                    "value": 1.0
+                }
+            elif srf.type == "dataset":
+                return srf.dataset_id
+            elif srf.type == "custom":
+                if srf.data and "wavelengths" in srf.data and "values" in srf.data:
+                    return {
+                        "type": "array",
+                        "wavelengths": srf.data["wavelengths"],
+                        "values": srf.data["values"]
+                    }
+                else:
+                    raise ValueError("Custom SRF requires 'wavelengths' and 'values' in data")
+            else:
+                raise ValueError(f"Unsupported SRF type: {srf.type}")
+    
+    def _resolve_platform_srf(self, platform: str, instrument: str, band: str) -> str:
+        """
+        Resolve platform/instrument/band combination to Eradiate SRF identifier.
+        
+        This method converts platform identifiers to Eradiate dataset identifiers.
+        """
+        platform_norm = platform.lower().replace('-', '_')
+        instrument_norm = instrument.lower()
+        band_norm = band.lower()
+        
+        srf_id = f"{platform_norm}-{instrument_norm}-{band_norm}"
+        
+        return srf_id
+    
+    def _create_output_metadata(self, output_dir: Path) -> Dict[str, Any]:
+        """Create standardized metadata for output files."""
+        return {
+            'simulation_name': self.simulation_config.name,
+            'description': self.simulation_config.description,
+            'created_at': self.simulation_config.created_at.isoformat(),
+            'backend': 'eradiate',
+            'output_dir': str(output_dir),
+            'num_sensors': len(self.simulation_config.sensors),
+            'sensor_types': [s.platform_type.value for s in self.simulation_config.sensors],
+            'illumination_type': self.simulation_config.illumination.type
+        }
+    
     def _create_target_surface(self, scene_config, scene_dir: Path) -> Dict[str, Any]:
-        """Create target surface with material selection."""
+        """Create target surface (reused from original backend)."""
         target_mesh_path = scene_dir / scene_config.target["mesh"]
         target_texture_path = scene_dir / scene_config.target["selection_texture"]
         
@@ -201,7 +488,7 @@ class EradiateBackend(SimulationBackend):
                     "data": selection_texture_data,
                 },
                 **{f"bsdf_{i:02d}": {"type": "ref", "id": mat_id}
-                   for i, mat_id in enumerate(material_ids)}
+                for i, mat_id in enumerate(material_ids)}
             },
             "terrain": {
                 "type": "ply",
@@ -212,7 +499,7 @@ class EradiateBackend(SimulationBackend):
         }
     
     def _create_buffer_surface(self, scene_config, scene_dir: Path) -> Dict[str, Any]:
-        """Create buffer surface with material selection and optional masking."""
+        """Create buffer surface (reused from original backend)."""
         buffer_mesh_path = scene_dir / scene_config.buffer["mesh"]
         buffer_texture_path = scene_dir / scene_config.buffer["selection_texture"]
         mask_path = scene_dir / scene_config.buffer["mask_texture"] if "mask_texture" in scene_config.buffer else None
@@ -273,11 +560,10 @@ class EradiateBackend(SimulationBackend):
         return result
     
     def _create_background_surface(self, scene_config, scene_dir: Path) -> Dict[str, Any]:
-        """Create background surface using dreams-scenes approach."""
+        """Create background surface (reused from original backend)."""
         elevation = scene_config.background["elevation"]
         mask_texture_path = scene_dir / scene_config.background["mask_texture"]
         
-        # Get material ID and ensure it has the proper "_mat_" prefix
         material_name = scene_config.background.get("material", "water")
         if not material_name.startswith("_mat_"):
             material_id = f"_mat_{material_name}"
@@ -300,8 +586,6 @@ class EradiateBackend(SimulationBackend):
             [0.5 * (1.0 / scale - 1.0), 0.5 * (1.0 / scale - 1.0), 0.0]
         )
         
-        print(f"Added background surface at elevation {elevation:.1f}m")
-        
         return {
             "background_surface": {
                 "type": "rectangle",
@@ -322,100 +606,92 @@ class EradiateBackend(SimulationBackend):
             }
         }
     
+    def _create_rgb_visualization(self, experiment, output_dir: Path, id_to_plot: str):
+        """Create RGB visualization from camera results."""
+        try:
+            if id_to_plot not in experiment.results:
+                print(f"Warning: Sensor '{id_to_plot}' not found in results")
+                return
+                
+            sensor_data = experiment.results[id_to_plot]
+            
+            if "radiance" in sensor_data:
+                radiance_data = sensor_data["radiance"]
+                
+                if "x_index" in radiance_data.dims and "y_index" in radiance_data.dims:
+                    img = dataarray_to_rgb(
+                        radiance_data,
+                        channels=[("w", 660), ("w", 550), ("w", 440)],
+                        normalize=False,
+                    ) * 1.8
+                    
+                    img = np.clip(img, 0, 1)
+                    
+                    rgb_output = output_dir / f"{id_to_plot}_rgb.png"
+                    plt_img = (img * 255).astype(np.uint8)
+                    rgb_image = Image.fromarray(plt_img)
+                    rgb_image.save(rgb_output)
+                    
+                    print(f"Camera RGB image saved to: {rgb_output}")
+                    
+                else:
+                    spectral_output = output_dir / f"{id_to_plot}_spectrum.png"
+                    self._plot_spectral_data(radiance_data, spectral_output)
+                    print(f"Spectral data plot saved to: {spectral_output}")
+                    
+        except Exception as e:
+            print(f"Warning: Could not create visualization for {id_to_plot}: {e}")
+    
+    def _plot_spectral_data(self, radiance_data, output_path: Path):
+        """Plot spectral data for point sensors."""
+        try:
+            import matplotlib.pyplot as plt
+            
+            wavelengths = radiance_data.coords["w"].values
+            radiance_values = radiance_data.values
+            
+            plt.figure(figsize=(10, 6))
+            plt.plot(wavelengths, radiance_values, 'b-', linewidth=2)
+            plt.xlabel('Wavelength (nm)')
+            plt.ylabel('Radiance')
+            plt.title('Spectral Radiance')
+            plt.grid(True, alpha=0.3)
+            plt.tight_layout()
+            plt.savefig(output_path, dpi=150, bbox_inches='tight')
+            plt.close()
+            
+        except ImportError:
+            print("Warning: matplotlib not available for spectral plotting")
+        except Exception as e:
+            print(f"Warning: Could not create spectral plot: {e}")
+    
     def _process_results(self, experiment, output_dir: Path) -> xr.Dataset:
-        """
-        Process simulation results, save each sensor to a separate netCDF file,
-        and optionally create a combined Dataset.
-        
-        This method handles cases where results are a single Dataset or a 
-        dictionary of Datasets keyed by sensor ID. When multiple sensors are
-        present, each sensor's results are saved to individual netCDF files.
-        """
+        """Process and save simulation results."""
         results = experiment.results
-
+        
         if not results:
-            raise ValueError("No results found in experiment.")
-
+            raise ValueError("No results found in experiment")
+        
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         
-        saved_files = []
-
+        metadata = self._create_output_metadata(output_dir)
+        
         if isinstance(results, dict):
-            print(f"Found a dictionary of results with {len(results)} sensors.")
-            print("Saving each sensor to separate netCDF files...")
-            
-            datasets = list(results.values())
-            sensor_ids = list(results.keys())
-            
-            # Save each sensor's results to separate files
             for sensor_id, dataset in results.items():
-                sensor_output = output_dir / f"eradiate_results_{sensor_id}.nc"
+                sensor_output = output_dir / f"{self.simulation_config.name}_{sensor_id}.nc"
                 
-                # Add metadata to individual dataset
+                dataset.attrs.update(metadata)
                 dataset.attrs['sensor_id'] = sensor_id
-                dataset.attrs['saved_to'] = str(sensor_output)
-                dataset.attrs['output_dir'] = str(output_dir)
-                dataset.attrs['backend'] = 'eradiate'
                 
                 dataset.to_netcdf(sensor_output)
-                saved_files.append(sensor_output)
-                print(f"  Sensor '{sensor_id}' saved to {sensor_output}")
-            
-            # Create concatenated dataset for return value
-            try:
-                results_ds = xr.concat(datasets, dim="sensor_id", compat='override')
-                results_ds = results_ds.assign_coords(sensor_id=sensor_ids)
-                
-                # Also save combined file for backward compatibility
-                combined_output = output_dir / "eradiate_results_combined.nc"
-                results_ds.to_netcdf(combined_output)
-                saved_files.append(combined_output)
-                print(f"  Combined results saved to {combined_output}")
-            except Exception as e:
-                print(f"  Warning: Could not create combined file due to incompatible coordinates: {e}")
-                # Return the first dataset as fallback
-                results_ds = datasets[0]
-                results_ds.attrs['note'] = f"Combined file could not be created - using {sensor_ids[0]} dataset"
-
-        elif isinstance(results, xr.Dataset):
-            print("Found a single results Dataset.")
-            results_ds = results
-            
-            # Save single dataset
-            raw_output = output_dir / "eradiate_results.nc"
-            results_ds.to_netcdf(raw_output)
-            saved_files.append(raw_output)
-            print(f"Results successfully saved to {raw_output}")
+                print(f"Sensor '{sensor_id}' saved to {sensor_output}")
             
         else:
-            raise TypeError(
-                f"Unsupported experiment results type: {type(results)}. "
-                "Expected xr.Dataset or Dict[str, xr.Dataset]."
-            )
+            results_ds = results
+            single_output = output_dir / f"{self.simulation_config.name}_results.nc"
+            results_ds.attrs.update(metadata)
+            results_ds.to_netcdf(single_output)
+            print(f"Results saved to {single_output}")
         
-        # Update return dataset attributes
-        results_ds.attrs['saved_files'] = [str(f) for f in saved_files]
-        results_ds.attrs['output_dir'] = str(output_dir)
-        results_ds.attrs['backend'] = 'eradiate'
-        
-        return results_ds
-    
-    def _create_illumination_config(self) -> Dict[str, Any]:
-        """Create illumination configuration for Eradiate."""
-        illumination = self.render_config.illumination
-        config = illumination.to_dict()
-        
-        # Add units for angular parameters
-        if "zenith" in config:
-            config["zenith"] = config["zenith"] * ureg.deg
-        if "azimuth" in config:
-            config["azimuth"] = config["azimuth"] * ureg.deg
-        
-        return config
-    
-    def _create_measure_config(self, sensor) -> Dict[str, Any]:
-        """Create measure configuration for Eradiate from sensor."""
-        config = sensor.to_dict()
-        
-        return config
+        return results
