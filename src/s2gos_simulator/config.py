@@ -125,15 +125,15 @@ INSTRUMENT_BANDS = {
 
 class MeasurementType(str, Enum):
     """Radiative quantities that can be measured."""
-    BRF = "brf"                     # TODO: Implement
-    HDRF = "hdrf"                   # TODO: Implement
-    BHR = "bhr"                     # TODO: Implement
-    BHR_ISO = "bhr_iso"             # TODO: Implement
-    FLUX_3D = "flux_3d"             # TODO: Implement
-    RADIANCE = "radiance"       
-    IRRADIANCE = "irradiance"       # TODO: Implement
-    DIGITAL_HEMISPHERICAL_PHOTOGRAPHY = "dhp" # TODO: Implement
-    FAPAR = 'fapar'                 # TODO: Implement
+    BRF = "brf"                     # Bidirectional Reflectance Factor
+    HDRF = "hdrf"                   # Hemispherical-Directional Reflectance Factor
+    BHR = "bhr"                     # Bi-Hemispherical Reflectance
+    BHR_ISO = "bhr_iso"             # Bi-Hemispherical Reflectance (isotropic)
+    FLUX_3D = "flux_3d"             # 3D flux distributions
+    RADIANCE = "radiance"           # Spectral radiance (instrument-specific)
+    IRRADIANCE = "irradiance"       # Spectral irradiance
+    DIGITAL_HEMISPHERICAL_PHOTOGRAPHY = "dhp" # Digital Hemispherical Photography
+    FAPAR = 'fapar'                 # Fraction of Absorbed Photosynthetically Active Radiation
 
 
 class ProcessingLevel(str, Enum):
@@ -248,6 +248,36 @@ class HemisphericalViewing(BaseViewing):
     upward_looking: bool = Field(True, description="True for upward-looking (sky), False for downward-looking (ground)")
 
 ViewingType = Union[AngularViewing, AngularFromOriginViewing, LookAtViewing, HemisphericalViewing]
+
+
+class RadiativeQuantityConfig(BaseModel):
+    """Configuration for radiative quantities independent of sensors."""
+    
+    quantity: MeasurementType = Field(..., description="Type of radiative quantity to calculate")
+    wavelengths: Optional[List[float]] = Field(None, description="Wavelengths in nm for calculation")
+    wavelength_range: Optional[tuple[float, float]] = Field(None, description="Wavelength range [min, max] in nm")
+    viewing_zenith: Optional[float] = Field(None, ge=0.0, le=180.0, description="Viewing zenith angle for directional quantities")
+    viewing_azimuth: Optional[float] = Field(None, ge=0.0, lt=360.0, description="Viewing azimuth angle for directional quantities")
+    samples_per_pixel: int = Field(64, ge=1, description="Number of samples per pixel for Monte Carlo calculations")
+    
+    @field_validator('wavelengths')
+    @classmethod
+    def validate_wavelengths(cls, v):
+        if v is not None:
+            return [float(w) for w in v]
+        return v
+    
+    @model_validator(mode='after')
+    def validate_quantity_config(self):
+        """Validate configuration based on quantity type."""
+        if self.quantity in [MeasurementType.BRF, MeasurementType.HDRF]:
+            if self.viewing_zenith is None or self.viewing_azimuth is None:
+                raise ValueError(f"{self.quantity} requires viewing_zenith and viewing_azimuth")
+        
+        if self.wavelengths is not None and self.wavelength_range is not None:
+            raise ValueError("Cannot specify both wavelengths and wavelength_range")
+        
+        return self
 
 
 class BaseSensor(BaseModel):
@@ -503,7 +533,10 @@ class SimulationConfig(BaseModel):
         default_factory=None, description="Illumination configuration"
     )
     sensors: List[Union[SatelliteSensor, UAVSensor, GroundSensor]] = Field(
-        ..., min_items=1, description="List of sensors to simulate"
+        default_factory=list, description="List of sensors to simulate"
+    )
+    radiative_quantities: List[RadiativeQuantityConfig] = Field(
+        default_factory=list, description="List of radiative quantities to calculate independently"
     )
     
     # Processing configuration
@@ -535,14 +568,20 @@ class SimulationConfig(BaseModel):
     @classmethod
     def validate_sensors(cls, v):
         """Validate sensor list."""
-        if not v:
-            raise ValueError("At least one sensor is required")
-        
-        sensor_ids = [sensor.id for sensor in v]
-        if len(sensor_ids) != len(set(sensor_ids)):
-            raise ValueError("Sensor IDs must be unique")
-        
+        if v:
+            sensor_ids = [sensor.id for sensor in v]
+            if len(sensor_ids) != len(set(sensor_ids)):
+                raise ValueError("Sensor IDs must be unique")
         return v
+    
+    @model_validator(mode='after')
+    def validate_simulation_config(self):
+        """Validate simulation configuration."""
+        # Must have at least one sensor or radiative quantity
+        if not self.sensors and not self.radiative_quantities:
+            raise ValueError("At least one sensor or radiative quantity must be specified")
+        
+        return self
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""

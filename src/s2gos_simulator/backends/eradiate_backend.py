@@ -47,7 +47,7 @@ class EradiateBackend(SimulationBackend):
     @property
     def supported_measurements(self) -> List[str]:
         """Measurement types supported by Eradiate."""
-        return ["radiance", "brf", "hdrf", "bhr", "bhr_iso", "farar", "flux_3d"]
+        return ["radiance", "brf", "hdrf", "bhr", "bhr_iso", "fapar", "flux_3d", "irradiance", "dhp"]
     
     def validate_configuration(self) -> List[str]:
         """Validate configuration for Eradiate backend."""
@@ -66,6 +66,14 @@ class EradiateBackend(SimulationBackend):
                                            GroundInstrumentType.PYRANOMETER, GroundInstrumentType.FLUX_METER, 
                                            GroundInstrumentType.DHP_CAMERA]:
                     errors.append(f"Ground sensor {sensor.id} instrument type {sensor.instrument} is not supported")
+        
+        for rq in self.simulation_config.radiative_quantities:
+            if rq.quantity.value not in self.supported_measurements:
+                errors.append(f"Radiative quantity {rq.quantity} is not supported by Eradiate backend")
+            
+            if rq.quantity in [MeasurementType.BRF, MeasurementType.HDRF, MeasurementType.RADIANCE]:
+                if rq.viewing_zenith is None or rq.viewing_azimuth is None:
+                    errors.append(f"Radiative quantity {rq.quantity} requires viewing_zenith and viewing_azimuth")
         
         return errors
     
@@ -113,6 +121,7 @@ class EradiateBackend(SimulationBackend):
         
         print(f"Running Eradiate simulation: {self.simulation_config.name}")
         print(f"Sensors: {len(self.simulation_config.sensors)}")
+        print(f"Radiative quantities: {len(self.simulation_config.radiative_quantities)}")
         print(f"Measurement types: {[mt.value for mt in self.simulation_config.output_quantities]}")
         
         
@@ -290,8 +299,10 @@ class EradiateBackend(SimulationBackend):
         return target_vec.tolist(), direction.tolist()
 
     def _translate_sensors(self) -> List[Dict[str, Any]]:
-        """Translate generic sensors to Eradiate measures."""
+        """Translate generic sensors and radiative quantities to Eradiate measures."""
         measures = []
+        
+        # Translate sensor-based measures
         for sensor in self.simulation_config.sensors:
             if isinstance(sensor, SatelliteSensor):
                 measures.append(self._translate_satellite_sensor(sensor))
@@ -301,6 +312,11 @@ class EradiateBackend(SimulationBackend):
                 measures.append(self._translate_ground_sensor(sensor))
             else:
                 raise ValueError(f"Unsupported sensor type: {type(sensor)}")
+        
+        # Translate radiative quantity measures
+        for rad_quantity in self.simulation_config.radiative_quantities:
+            measures.append(self._translate_radiative_quantity(rad_quantity))
+        
         return measures
 
     def _translate_satellite_sensor(self, sensor: SatelliteSensor) -> Dict[str, Any]:
@@ -392,6 +408,53 @@ class EradiateBackend(SimulationBackend):
             raise ValueError(f"Unsupported viewing type for ground sensor: {type(view)}")
 
         return base_measure
+    
+    def _translate_radiative_quantity(self, rad_quantity) -> Dict[str, Any]:
+        """Translate radiative quantity configuration to placeholder measure.
+        
+        TODO: This is a placeholder implementation. Future versions will:
+        1. Determine appropriate sensors needed for the radiative quantity
+        2. Instantiate those sensors internally
+        3. Calculate the requested quantity from sensor results
+        """
+        from ..config import MeasurementType
+        
+        quantity_id = f"{rad_quantity.quantity.value}_measure"
+        
+        # Log TODO message for user clarity
+        print(f"TODO: {rad_quantity.quantity.value.upper()} calculation not yet implemented - generating placeholder")
+        
+        base_config = {
+            "id": quantity_id,
+            "type": "distant",
+            "construct": "from_angles", 
+            "angles": [0.0, 0.0],  # Nadir view as placeholder
+            "spp": rad_quantity.samples_per_pixel
+        }
+        
+        # Set basic wavelength configuration
+        if rad_quantity.wavelengths:
+            base_config["srf"] = {
+                "type": "delta",
+                "wavelengths": rad_quantity.wavelengths
+            }
+        elif rad_quantity.wavelength_range:
+            base_config["srf"] = {
+                "type": "uniform",
+                "wmin": rad_quantity.wavelength_range[0],
+                "wmax": rad_quantity.wavelength_range[1],
+                "value": 1.0
+            }
+        else:
+            # Default to visible spectrum
+            base_config["srf"] = {
+                "type": "uniform",
+                "wmin": 400.0,
+                "wmax": 700.0,
+                "value": 1.0
+            }
+        
+        return base_config
         
     def _translate_srf(self, srf) -> Union[Dict[str, Any], str]:
         """Translate generic SRF to Eradiate format."""
@@ -457,7 +520,9 @@ class EradiateBackend(SimulationBackend):
             'backend': 'eradiate',
             'output_dir': str(output_dir),
             'num_sensors': len(self.simulation_config.sensors),
+            'num_radiative_quantities': len(self.simulation_config.radiative_quantities),
             'sensor_types': [s.platform_type.value for s in self.simulation_config.sensors],
+            'radiative_quantities': [rq.quantity.value for rq in self.simulation_config.radiative_quantities],
             'illumination_type': self.simulation_config.illumination.type
         }
     
@@ -677,21 +742,93 @@ class EradiateBackend(SimulationBackend):
         
         metadata = self._create_output_metadata(output_dir)
         
+        # Process regular sensor results
         if isinstance(results, dict):
             for sensor_id, dataset in results.items():
-                sensor_output = output_dir / f"{self.simulation_config.name}_{sensor_id}.nc"
+                sensor_output = output_dir / f"{self.simulation_config.name}_{sensor_id}.zarr"
                 
                 dataset.attrs.update(metadata)
                 dataset.attrs['sensor_id'] = sensor_id
                 
-                dataset.to_netcdf(sensor_output)
+                dataset.to_zarr(sensor_output, mode="w")
                 print(f"Sensor '{sensor_id}' saved to {sensor_output}")
             
         else:
             results_ds = results
-            single_output = output_dir / f"{self.simulation_config.name}_results.nc"
+            single_output = output_dir / f"{self.simulation_config.name}_results.zarr"
             results_ds.attrs.update(metadata)
-            results_ds.to_netcdf(single_output)
+            results_ds.to_zarr(single_output, mode="w")
             print(f"Results saved to {single_output}")
         
+        # Generate dummy results for radiative quantities (TODO placeholders)
+        for rad_quantity in self.simulation_config.radiative_quantities:
+            dummy_output = self._create_dummy_radiative_quantity_result(rad_quantity, output_dir, metadata)
+            print(f"TODO: {rad_quantity.quantity.value.upper()} placeholder saved to {dummy_output}")
+        
         return results
+    
+    def _create_dummy_radiative_quantity_result(self, rad_quantity, output_dir: Path, metadata: dict) -> Path:
+        """Create dummy Zarr file for radiative quantity placeholder.
+        
+        TODO: This creates placeholder data. Future implementation will:
+        1. Use results from appropriate sensors 
+        2. Calculate the actual radiative quantity
+        3. Return real calculated values
+        """
+        import numpy as np
+        
+        quantity_id = f"{rad_quantity.quantity.value}_measure"
+        dummy_output = output_dir / f"{self.simulation_config.name}_{quantity_id}.zarr"
+        
+        # Create dummy data 
+        dummy_data = np.ones((10, 10)) * 0.5
+
+        # Get wavelengths for the quantity
+        if rad_quantity.wavelengths:
+            wavelengths = rad_quantity.wavelengths
+        elif rad_quantity.wavelength_range:
+            # Create 3 sample wavelengths in the range
+            wmin, wmax = rad_quantity.wavelength_range
+            wavelengths = [wmin, (wmin + wmax) / 2, wmax]
+        else:
+            wavelengths = [550.0]  # Default visible wavelength
+        
+        # Create xarray dataset with appropriate structure
+        if len(wavelengths) > 1:
+            # Multi-spectral data
+            dummy_values = np.stack([dummy_data for _ in wavelengths], axis=0)
+            coords = {
+                'wavelength': ('wavelength', wavelengths),
+                'x': ('x', np.arange(10)),
+                'y': ('y', np.arange(10))
+            }
+            dims = ['wavelength', 'y', 'x']
+        else:
+            # Single wavelength
+            dummy_values = dummy_data
+            coords = {
+                'x': ('x', np.arange(10)),
+                'y': ('y', np.arange(10))
+            }
+            dims = ['y', 'x']
+        
+        # Create dataset
+        dummy_dataset = xr.Dataset({
+            rad_quantity.quantity.value: (dims, dummy_values)
+        }, coords=coords)
+        
+        # Add metadata
+        dummy_dataset.attrs.update(metadata)
+        dummy_dataset.attrs.update({
+            'radiative_quantity': rad_quantity.quantity.value,
+            'status': 'TODO_PLACEHOLDER',
+            'description': f'Placeholder data for {rad_quantity.quantity.value} calculation',
+            'samples_per_pixel': rad_quantity.samples_per_pixel,
+            'viewing_zenith': rad_quantity.viewing_zenith,
+            'viewing_azimuth': rad_quantity.viewing_azimuth
+        })
+        
+        # Save as Zarr
+        dummy_dataset.to_zarr(dummy_output, mode="w")
+        
+        return dummy_output

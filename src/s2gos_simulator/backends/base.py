@@ -67,8 +67,8 @@ class SimulationBackend(ABC):
         errors = []
         
         # Generic validation - can be overridden by specific backends
-        if not self.simulation_config.sensors:
-            errors.append("No sensors defined in configuration")
+        if not self.simulation_config.sensors and not getattr(self.simulation_config, 'radiative_quantities', []):
+            errors.append("No sensors or radiative quantities defined in configuration")
         
         # Check if backend supports all requested measurement types
         unsupported_measurements = self._get_unsupported_measurements()
@@ -112,13 +112,28 @@ class SimulationBackend(ABC):
         return self.simulation_config.illumination.model_dump()
     
     def _translate_sensors(self) -> List[Dict[str, Any]]:
-        """Translate generic sensor configs to backend-specific format.
+        """Translate generic sensor configs and radiative quantities to backend-specific format.
+        
+        Note: This method now handles both sensors and radiative quantities.
+        Override in specific backends to provide proper translation.
         
         Returns:
-            List of backend-specific sensor configurations
+            List of backend-specific measurement configurations
         """
         # Default implementation - override in specific backends
-        return [sensor.model_dump() for sensor in self.simulation_config.sensors]
+        measures = [sensor.model_dump() for sensor in self.simulation_config.sensors]
+        
+        # Add basic radiative quantity handling if present
+        if hasattr(self.simulation_config, 'radiative_quantities'):
+            for rq in self.simulation_config.radiative_quantities:
+                measures.append({
+                    'id': f"{rq.quantity.value}_measure",
+                    'type': 'placeholder',
+                    'radiative_quantity': rq.quantity.value,
+                    'TODO': 'Implement in specific backend'
+                })
+        
+        return measures
     
     def _create_output_metadata(self, output_dir: Optional[Path] = None) -> Dict[str, Any]:
         """Create standardized output metadata.
@@ -134,7 +149,8 @@ class SimulationBackend(ABC):
             'backend': self.name,
             'created_at': self.simulation_config.created_at.isoformat(),
             'sensor_count': len(self.simulation_config.sensors),
-            'measurement_types': [mt.value for mt in self.simulation_config.output_quantities],
+            'radiative_quantity_count': len(getattr(self.simulation_config, 'radiative_quantities', [])),
+            'measurement_types': [mt.value for mt in self.simulation_config.output_quantities] if hasattr(self.simulation_config, 'output_quantities') else [],
             'wavelength_range': self.simulation_config.wavelength_range,
             'orthorectified': self.simulation_config.processing.orthorectified,
         }
