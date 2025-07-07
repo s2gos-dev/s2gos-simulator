@@ -139,13 +139,18 @@ class EradiateBackend(SimulationBackend):
     def _create_experiment(self, scene_config, scene_dir: Path):
         """Create Eradiate experiment from new configuration system."""
         try:
-            from s2gos_generator.materials.registry import MaterialRegistry
             from s2gos_generator.assets.atmosphere import create_atmosphere
         except ImportError as e:
             raise ImportError(f"s2gos_generator is required: {e}")
         
-        materials = scene_config.materials
-        kdict, kpmap = MaterialRegistry.create_material_kdict_kpmap(materials)
+        # Generate kdict and kpmap directly from loaded materials
+        kdict = {}
+        kpmap = {}
+        for mat_name, material in scene_config.materials.items():
+            mat_kdict = material.kdict("mono")
+            mat_kpmap = material.kpmap("mono")
+            kdict.update(mat_kdict)
+            kpmap.update(mat_kpmap)
         
         kdict.update(self._create_target_surface(scene_config, scene_dir))
         
