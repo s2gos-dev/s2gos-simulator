@@ -32,8 +32,17 @@ class EradiateBackend(SimulationBackend):
         """Initialize the Eradiate backend with new configuration system."""
         super().__init__(simulation_config)
         
+        eradiate_hints = simulation_config.backend_hints.get("eradiate", {})
+        self._eradiate_mode = eradiate_hints.get("mode", "mono")
+        
         if ERADIATE_AVAILABLE:
-            eradiate.set_mode("mono")
+            try:
+                eradiate.set_mode(self._eradiate_mode)
+            except Exception as e:
+                raise ValueError(
+                    f"Failed to set Eradiate mode '{self._eradiate_mode}': {e}. "
+                    f"Check if this mode is supported in your Eradiate installation."
+                )
     
     def is_available(self) -> bool:
         """Check if Eradiate dependencies are available."""
@@ -55,6 +64,16 @@ class EradiateBackend(SimulationBackend):
         
         if not self.is_available():
             errors.append("Eradiate is not available. Install with: pip install eradiate[kernel]")
+        
+        valid_modes = {
+            "mono", "ckd", "mono_polarized", "ckd_polarized",
+            "mono_single", "mono_polarized_single", "mono_double", "mono_polarized_double",
+            "ckd_single", "ckd_polarized_single", "ckd_double", "ckd_polarized_double", "none"
+        }
+        if self._eradiate_mode not in valid_modes:
+            errors.append(
+                f"Invalid Eradiate mode '{self._eradiate_mode}'. Valid modes: {sorted(valid_modes)}"
+            )
         
         for sensor in self.simulation_config.sensors:
             if sensor.platform_type == PlatformType.SATELLITE:
@@ -143,12 +162,11 @@ class EradiateBackend(SimulationBackend):
         except ImportError as e:
             raise ImportError(f"s2gos_generator is required: {e}")
         
-        # Generate kdict and kpmap directly from loaded materials
         kdict = {}
         kpmap = {}
         for mat_name, material in scene_config.materials.items():
-            mat_kdict = material.kdict("mono")
-            mat_kpmap = material.kpmap("mono")
+            mat_kdict = material.kdict(self._eradiate_mode)
+            mat_kpmap = material.kpmap(self._eradiate_mode)
             kdict.update(mat_kdict)
             kpmap.update(mat_kpmap)
         
@@ -166,8 +184,10 @@ class EradiateBackend(SimulationBackend):
         
         measures = self._translate_sensors()
         
+        geometry = self._create_geometry_from_atmosphere(scene_config)
+        
         return AtmosphereExperiment(
-            geometry={"type": "plane_parallel", "toa_altitude": 40.0 * ureg.km},
+            geometry=geometry,
             atmosphere=atmosphere,
             surface=None,
             illumination=illumination,
@@ -176,87 +196,157 @@ class EradiateBackend(SimulationBackend):
             kpmap=kpmap
         )
     
+    def _create_geometry_from_atmosphere(self, scene_config):
+        """Create geometry with bounds matching the atmosphere configuration."""
+        atmosphere = scene_config.atmosphere if hasattr(scene_config, 'atmosphere') else scene_config.get('atmosphere', {})
+        toa = atmosphere.get("toa", 40000.0)  # Top of atmosphere (meters)
+        
+        geometry = {
+            "type": "plane_parallel",
+            "toa_altitude": toa,
+        }
+        
+        return geometry
+    
     def _create_atmosphere_from_config(self, scene_config):
-        """Create atmosphere based on the configuration mode."""
+        """Create atmosphere based on scene description dictionary format."""
         try:
-            from s2gos_generator.assets.atmosphere import create_atmosphere
-            from s2gos_generator.core.config import AtmosphereMode
+            from s2gos_generator.assets.atmosphere import create_atmosphere, create_molecular_atmosphere, create_heterogeneous_atmosphere
         except ImportError as e:
             raise ImportError(f"s2gos_generator atmosphere assets required: {e}")
         
-        # Handle both legacy (dict) and new (Pydantic) atmosphere configs
-        if hasattr(scene_config, 'atmosphere') and hasattr(scene_config.atmosphere, 'mode'):
-            # New Pydantic configuration
-            atm_config = scene_config.atmosphere
-            
-            if atm_config.mode == AtmosphereMode.PRESET:
-                return create_atmosphere(
-                    boa=atm_config.boa,
-                    toa=atm_config.toa,
-                    aerosol_ot=atm_config.aerosol_ot,
-                    aerosol_scale=atm_config.aerosol_scale,
-                    aerosol_ds=atm_config.aerosol_ds.value
-                )
-            
-            elif atm_config.mode == AtmosphereMode.DATASET:
-                # Use specific Eradiate datasets
-                return self._create_atmosphere_from_datasets(atm_config)
-            
-            elif atm_config.mode == AtmosphereMode.CUSTOM:
-                # Use custom molecular/particle layers
-                return self._create_atmosphere_from_custom_layers(atm_config)
-            
-            elif atm_config.mode == AtmosphereMode.RAW:
-                # Use raw Eradiate configuration
-                return atm_config.raw_config
-            
-            else:
-                raise ValueError(f"Unsupported atmosphere mode: {atm_config.mode}")
+        atmosphere = scene_config.atmosphere if hasattr(scene_config, 'atmosphere') else scene_config.get('atmosphere', {})
+        atmosphere_type = atmosphere.get("type", None)
         
+        if not atmosphere_type:
+            raise ValueError("Atmosphere configuration must specify 'type' field")
+        
+        if atmosphere_type == "molecular":
+            return self._create_molecular_atmosphere_from_scene(atmosphere)
+        elif atmosphere_type == "homogeneous":
+            return self._create_homogeneous_atmosphere_from_scene(atmosphere)
+        elif atmosphere_type == "heterogeneous":
+            return self._create_heterogeneous_atmosphere_from_scene(atmosphere)
         else:
-            # Legacy configuration (dict-based)
-            atmosphere = scene_config.atmosphere if hasattr(scene_config, 'atmosphere') else {}
-            return create_atmosphere(
-                boa=atmosphere.get("boa", 0.0),
-                toa=atmosphere.get("toa", 40.0e3),
-                aerosol_ot=atmosphere.get("aerosol_ot", 0.1),
-                aerosol_scale=atmosphere.get("aerosol_scale", 1e3),
-                aerosol_ds=atmosphere.get("aerosol_ds", "sixsv-continental")
-            )
+            raise ValueError(f"Unknown atmosphere type: {atmosphere_type}")
     
-    def _create_atmosphere_from_datasets(self, atm_config):
-        """Create atmosphere using specific Eradiate datasets."""
-        # This would be implemented based on Eradiate's dataset loading capabilities
-        # For now, fall back to basic configuration
-        aerosol_ds = atm_config.aerosol_dataset.value if atm_config.aerosol_dataset else "sixsv-continental"
+    def _reconstruct_molecular_config(self, mol_dict):
+        """Reconstruct MolecularAtmosphereConfig from scene description."""
+        from s2gos_generator.core.config import ThermophysicalConfig, MolecularAtmosphereConfig, AbsorptionDatabase
         
-        try:
-            from s2gos_generator.assets.atmosphere import create_atmosphere
-            return create_atmosphere(
-                boa=atm_config.boa,
-                toa=atm_config.toa,
-                aerosol_ot=0.1,  # Default value
-                aerosol_scale=1000.0,  # Default value
-                aerosol_ds=aerosol_ds
-            )
-        except ImportError as e:
-            raise ImportError(f"s2gos_generator atmosphere assets required: {e}")
+        thermoprops = ThermophysicalConfig(
+            identifier=mol_dict.get("thermoprops_identifier", "afgl_1986-us_standard"),
+            altitude_min=mol_dict.get("altitude_min", 0.0),
+            altitude_max=mol_dict.get("altitude_max", 120000.0),
+            altitude_step=mol_dict.get("altitude_step", 1000.0),
+            constituent_scaling=mol_dict.get("constituent_scaling")
+        )
+        
+        absorption_db = None
+        if mol_dict.get("absorption_database"):
+            absorption_db = AbsorptionDatabase(mol_dict["absorption_database"])
+        
+        return MolecularAtmosphereConfig(
+            thermoprops=thermoprops,
+            absorption_database=absorption_db,
+            has_absorption=mol_dict.get("has_absorption", True),
+            has_scattering=mol_dict.get("has_scattering", True)
+        )
     
-    def _create_atmosphere_from_custom_layers(self, atm_config):
-        """Create atmosphere using custom molecular/particle layers."""
-        # This would be implemented to create custom Eradiate atmosphere
-        # For now, fall back to basic configuration
-        try:
-            from s2gos_generator.assets.atmosphere import create_atmosphere
-            return create_atmosphere(
-                boa=atm_config.boa,
-                toa=atm_config.toa,
-                aerosol_ot=0.1,  # Default value
-                aerosol_scale=1000.0,  # Default value  
-                aerosol_ds="sixsv-continental"  # Default dataset
+    def _reconstruct_particle_configs(self, particle_layers_list):
+        """Reconstruct ParticleLayerConfig list from scene description."""
+        from s2gos_generator.core.config import (
+            ParticleLayerConfig, AerosolDataset,
+            ExponentialDistribution, GaussianDistribution, UniformDistribution
+        )
+        
+        configs = []
+        for layer_dict in particle_layers_list:
+            dist_type = layer_dict.get("distribution_type", "exponential")
+            if dist_type == "exponential":
+                distribution = ExponentialDistribution(
+                    scale_height=layer_dict.get("scale_height", 1000.0)
+                )
+            elif dist_type == "gaussian":
+                distribution = GaussianDistribution(
+                    center_altitude=layer_dict.get("center_altitude", 5000.0),
+                    width=layer_dict.get("width", 1000.0)
+                )
+            else:
+                distribution = UniformDistribution()
+            
+            config = ParticleLayerConfig(
+                aerosol_dataset=AerosolDataset(layer_dict["aerosol_dataset"]),
+                optical_thickness=layer_dict["optical_thickness"],
+                altitude_bottom=layer_dict["altitude_bottom"],
+                altitude_top=layer_dict["altitude_top"],
+                distribution=distribution,
+                reference_wavelength=layer_dict.get("reference_wavelength", 550.0),
+                has_absorption=layer_dict.get("has_absorption", True)
             )
+            configs.append(config)
+        
+        return configs
+    
+    def _create_molecular_atmosphere_from_scene(self, atmosphere_dict):
+        """Create molecular atmosphere from scene description."""
+        try:
+            from s2gos_generator.assets.atmosphere import create_molecular_atmosphere
         except ImportError as e:
             raise ImportError(f"s2gos_generator atmosphere assets required: {e}")
+        
+        if "molecular_atmosphere" in atmosphere_dict:
+            mol_dict = atmosphere_dict["molecular_atmosphere"]
+            molecular_config = self._reconstruct_molecular_config(mol_dict)
+            
+            return create_molecular_atmosphere(
+                thermoprops_config=molecular_config.thermoprops,
+                absorption_database=molecular_config.absorption_database,
+                has_absorption=molecular_config.has_absorption,
+                has_scattering=molecular_config.has_scattering
+            )
+        else:
+            return create_molecular_atmosphere()
+    
+    def _create_homogeneous_atmosphere_from_scene(self, atmosphere_dict):
+        """Create homogeneous atmosphere from scene description."""
+        try:
+            from s2gos_generator.assets.atmosphere import create_atmosphere
+        except ImportError as e:
+            raise ImportError(f"s2gos_generator atmosphere assets required: {e}")
+        
+        return create_atmosphere(
+            boa=atmosphere_dict.get("boa", 0.0),
+            toa=atmosphere_dict.get("toa", 40000.0),
+            aerosol_ot=atmosphere_dict.get("aerosol_ot", 0.1),
+            aerosol_scale=atmosphere_dict.get("aerosol_scale", 1000.0),
+            aerosol_ds=atmosphere_dict.get("aerosol_ds", "sixsv-continental")
+        )
+    
+    def _create_heterogeneous_atmosphere_from_scene(self, atmosphere_dict):
+        """Create heterogeneous atmosphere from scene description."""
+        try:
+            from s2gos_generator.assets.atmosphere import create_heterogeneous_atmosphere
+        except ImportError as e:
+            raise ImportError(f"s2gos_generator atmosphere assets required: {e}")
+        
+        has_molecular = atmosphere_dict.get("has_molecular_atmosphere", False) or "molecular_atmosphere" in atmosphere_dict
+        has_particles = atmosphere_dict.get("has_particle_layers", False) or "particle_layers" in atmosphere_dict
+        
+        molecular_config = None
+        particle_configs = None
+        
+        if has_molecular:
+            mol_dict = atmosphere_dict["molecular_atmosphere"]
+            molecular_config = self._reconstruct_molecular_config(mol_dict)
+        
+        if has_particles:
+            particle_configs = self._reconstruct_particle_configs(atmosphere_dict["particle_layers"])
+        
+        return create_heterogeneous_atmosphere(
+            molecular_config=molecular_config,
+            particle_configs=particle_configs
+        )
     
     def _translate_illumination(self) -> Dict[str, Any]:
         """Translate generic illumination to Eradiate format."""

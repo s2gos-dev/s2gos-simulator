@@ -550,9 +550,9 @@ class SimulationConfig(BaseModel):
     # Example metadata
     # name: Annotated[str, Field(strict=True), WithJsonSchema({'extra': 'data'})]
     
-    # TODO: perhaps the place to specy the mode?
-    backend_preferences: Dict[str, Any] = Field(
-        default_factory=dict, description="Backend-specific preferences"
+    backend_hints: Dict[str, Any] = Field(
+        default_factory=dict, 
+        description="Backend-specific configuration hints (e.g., {'eradiate': {'mode': 'ckd_double'}})"
     )
     
     model_config = {
