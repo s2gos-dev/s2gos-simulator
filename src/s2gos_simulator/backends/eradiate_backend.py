@@ -49,6 +49,38 @@ class EradiateBackend(SimulationBackend):
         """Check if Eradiate dependencies are available."""
         return ERADIATE_AVAILABLE
     
+    def _get_material_ids_from_scene(self, scene_config) -> List[str]:
+        """Get material IDs from scene configuration material_indices mapping.
+        
+        Args:
+            scene_config: Scene configuration dictionary or object
+            
+        Returns:
+            List of material IDs with "_mat_" prefix in texture index order
+        """
+        if hasattr(scene_config, 'material_indices'):
+            # If it's a scene config object
+            material_indices = scene_config.material_indices
+        elif isinstance(scene_config, dict) and 'material_indices' in scene_config:
+            # If it's a dictionary from YAML
+            material_indices = scene_config['material_indices']
+        else:
+            # Fallback to hardcoded values if no material_indices found
+            print("Warning: No material_indices found in scene config, using hardcoded values")
+            return [
+                "_mat_treecover", "_mat_shrubland", "_mat_grassland", "_mat_cropland",
+                "_mat_concrete", "_mat_baresoil", "_mat_snow", "_mat_water",
+                "_mat_wetland", "_mat_mangroves", "_mat_moss"
+            ]
+        
+        # Generate material IDs with "_mat_" prefix, ordered by texture index
+        material_ids = []
+        for texture_index in sorted(material_indices.keys()):
+            material_name = material_indices[texture_index]
+            material_ids.append(f"_mat_{material_name}")
+        
+        return material_ids
+    
     @property
     def supported_platforms(self) -> List[str]:
         """Eradiate supports all platform types."""
@@ -158,11 +190,6 @@ class EradiateBackend(SimulationBackend):
     
     def _create_experiment(self, scene_config, scene_dir: Path):
         """Create Eradiate experiment from new configuration system."""
-        try:
-            from s2gos_generator.assets.atmosphere import create_atmosphere
-        except ImportError as e:
-            raise ImportError(f"s2gos_generator is required: {e}")
-        
         kdict = {}
         kpmap = {}
         for mat_name, material in scene_config.materials.items():
@@ -211,11 +238,6 @@ class EradiateBackend(SimulationBackend):
     
     def _create_atmosphere_from_config(self, scene_config):
         """Create atmosphere based on scene description dictionary format."""
-        try:
-            from s2gos_generator.assets.atmosphere import create_atmosphere, create_molecular_atmosphere, create_heterogeneous_atmosphere
-        except ImportError as e:
-            raise ImportError(f"s2gos_generator atmosphere assets required: {e}")
-        
         atmosphere = scene_config.atmosphere if hasattr(scene_config, 'atmosphere') else scene_config.get('atmosphere', {})
         atmosphere_type = atmosphere.get("type", None)
         
@@ -525,30 +547,9 @@ class EradiateBackend(SimulationBackend):
             "type": "distant",
             "construct": "from_angles", 
             "angles": [0.0, 0.0],  # Nadir view as placeholder
-            "spp": rad_quantity.samples_per_pixel
+            "spp": rad_quantity.samples_per_pixel,
+            "srf": self._translate_srf(rad_quantity.srf)
         }
-        
-        # Set basic wavelength configuration
-        if rad_quantity.wavelengths:
-            base_config["srf"] = {
-                "type": "delta",
-                "wavelengths": rad_quantity.wavelengths
-            }
-        elif rad_quantity.wavelength_range:
-            base_config["srf"] = {
-                "type": "uniform",
-                "wmin": rad_quantity.wavelength_range[0],
-                "wmax": rad_quantity.wavelength_range[1],
-                "value": 1.0
-            }
-        else:
-            # Default to visible spectrum
-            base_config["srf"] = {
-                "type": "uniform",
-                "wmin": 400.0,
-                "wmax": 700.0,
-                "value": 1.0
-            }
         
         return base_config
         
@@ -633,11 +634,7 @@ class EradiateBackend(SimulationBackend):
         selection_texture_data = np.array(texture_image)
         selection_texture_data = np.atleast_3d(selection_texture_data)
         
-        material_ids = [
-            "_mat_treecover", "_mat_shrubland", "_mat_grassland", "_mat_cropland",
-            "_mat_concrete", "_mat_baresoil", "_mat_snow", "_mat_water",
-            "_mat_wetland", "_mat_mangroves", "_mat_moss"
-        ]
+        material_ids = self._get_material_ids_from_scene(scene_config)
         
         return {
             "terrain_material": {
@@ -673,11 +670,7 @@ class EradiateBackend(SimulationBackend):
         buffer_selection_texture_data = np.array(buffer_texture_image)
         buffer_selection_texture_data = np.atleast_3d(buffer_selection_texture_data)
         
-        material_ids = [
-            "_mat_treecover", "_mat_shrubland", "_mat_grassland", "_mat_cropland",
-            "_mat_concrete", "_mat_baresoil", "_mat_snow", "_mat_water",
-            "_mat_wetland", "_mat_mangroves", "_mat_moss"
-        ]
+        material_ids = self._get_material_ids_from_scene(scene_config)
         
         result = {
             "buffer_material": {
@@ -738,11 +731,7 @@ class EradiateBackend(SimulationBackend):
         background_selection_texture_data = np.array(background_texture_image)
         background_selection_texture_data = np.atleast_3d(background_selection_texture_data)
         
-        material_ids = [
-            "_mat_treecover", "_mat_shrubland", "_mat_grassland", "_mat_cropland",
-            "_mat_concrete", "_mat_baresoil", "_mat_snow", "_mat_water",
-            "_mat_wetland", "_mat_mangroves", "_mat_moss"
-        ]
+        material_ids = self._get_material_ids_from_scene(scene_config)
         
         result = {
             "background_material": {
@@ -892,15 +881,10 @@ class EradiateBackend(SimulationBackend):
         # Create dummy data 
         dummy_data = np.ones((10, 10)) * 0.5
 
-        # Get wavelengths for the quantity
-        if rad_quantity.wavelengths:
-            wavelengths = rad_quantity.wavelengths
-        elif rad_quantity.wavelength_range:
-            # Create 3 sample wavelengths in the range
-            wmin, wmax = rad_quantity.wavelength_range
-            wavelengths = [wmin, (wmin + wmax) / 2, wmax]
-        else:
-            wavelengths = [550.0]  # Default visible wavelength
+        wavelengths = [550.0]  # Set a default value
+        srf = rad_quantity.srf
+        if srf.type == "delta" and srf.wavelengths:
+            wavelengths = srf.wavelengths
         
         # Create xarray dataset with appropriate structure
         if len(wavelengths) > 1:

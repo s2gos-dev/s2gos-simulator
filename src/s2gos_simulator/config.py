@@ -173,10 +173,6 @@ class SpectralResponse(BaseModel):
 SRFType = Union[SpectralResponse, str]
 
 
-# ============================================================================
-# Illumination Models
-# ============================================================================
-
 class Illumination(BaseModel):
     """Base illumination configuration."""
     type: str = Field(..., description="Illumination type")
@@ -255,18 +251,11 @@ class RadiativeQuantityConfig(BaseModel):
     """Configuration for radiative quantities independent of sensors."""
     
     quantity: MeasurementType = Field(..., description="Type of radiative quantity to calculate")
-    wavelengths: Optional[List[float]] = Field(None, description="Wavelengths in nm for calculation")
-    wavelength_range: Optional[tuple[float, float]] = Field(None, description="Wavelength range [min, max] in nm")
+    srf: Optional[SRFType] = Field(None, description="Spectral response function")
     viewing_zenith: Optional[float] = Field(None, ge=0.0, le=180.0, description="Viewing zenith angle for directional quantities")
     viewing_azimuth: Optional[float] = Field(None, ge=0.0, lt=360.0, description="Viewing azimuth angle for directional quantities")
     samples_per_pixel: int = Field(64, ge=1, description="Number of samples per pixel for Monte Carlo calculations")
     
-    @field_validator('wavelengths')
-    @classmethod
-    def validate_wavelengths(cls, v):
-        if v is not None:
-            return [float(w) for w in v]
-        return v
     
     @model_validator(mode='after')
     def validate_quantity_config(self):
@@ -274,9 +263,6 @@ class RadiativeQuantityConfig(BaseModel):
         if self.quantity in [MeasurementType.BRF, MeasurementType.HDRF]:
             if self.viewing_zenith is None or self.viewing_azimuth is None:
                 raise ValueError(f"{self.quantity} requires viewing_zenith and viewing_azimuth")
-        
-        if self.wavelengths is not None and self.wavelength_range is not None:
-            raise ValueError("Cannot specify both wavelengths and wavelength_range")
         
         return self
 
