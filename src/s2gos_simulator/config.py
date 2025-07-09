@@ -6,6 +6,7 @@ from enum import Enum
 from pydantic import BaseModel, Field, field_validator, model_validator
 import json
 import yaml
+from s2gos_generator.core.paths import read_json, open_file
 
 
 class PlatformType(str, Enum):
@@ -591,15 +592,14 @@ class SimulationConfig(BaseModel):
         """Export to JSON format."""
         json_str = self.model_dump_json(indent=indent)
         if path:
-            with open(path, 'w') as f:
+            with open_file(path, 'w') as f:
                 f.write(json_str)
         return json_str
     
     @classmethod
     def from_json(cls, path: Path) -> 'SimulationConfig':
         """Load from JSON file."""
-        with open(path, 'r') as f:
-            data = json.load(f)
+        data = read_json(path)
         return cls(**data)
     
     def add_sensor(self, sensor: Union[SatelliteSensor, UAVSensor, GroundSensor]):

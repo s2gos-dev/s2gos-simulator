@@ -3,6 +3,7 @@ from typing import Optional, Dict, Any, List, Union
 import numpy as np
 import xarray as xr
 from PIL import Image
+from s2gos_generator.core.paths import open_file
 
 from .base import SimulationBackend
 from ..config import (
@@ -626,7 +627,9 @@ class EradiateBackend(SimulationBackend):
         target_mesh_path = scene_dir / scene_config.target["mesh"]
         target_texture_path = scene_dir / scene_config.target["selection_texture"]
         
-        texture_image = Image.open(target_texture_path)
+        with open_file(target_texture_path, 'rb') as f:
+            texture_image = Image.open(f)
+            texture_image.load()
         selection_texture_data = np.array(texture_image)
         selection_texture_data = np.atleast_3d(selection_texture_data)
         
@@ -664,7 +667,9 @@ class EradiateBackend(SimulationBackend):
         buffer_texture_path = scene_dir / scene_config.buffer["selection_texture"]
         mask_path = scene_dir / scene_config.buffer["mask_texture"] if "mask_texture" in scene_config.buffer else None
         
-        buffer_texture_image = Image.open(buffer_texture_path)
+        with open_file(buffer_texture_path, 'rb') as f:
+            buffer_texture_image = Image.open(f)
+            buffer_texture_image.load()
         buffer_selection_texture_data = np.array(buffer_texture_image)
         buffer_selection_texture_data = np.atleast_3d(buffer_selection_texture_data)
         
@@ -693,7 +698,9 @@ class EradiateBackend(SimulationBackend):
         buffer_bsdf_id = "buffer_material"
         
         if mask_path and Path(mask_path).exists():
-            mask_image = Image.open(mask_path)
+            with open_file(mask_path, 'rb') as f:
+                mask_image = Image.open(f)
+                mask_image.load()
             mask_data = np.array(mask_image) / 255.0
             mask_data = np.atleast_3d(mask_data)
             
@@ -725,7 +732,9 @@ class EradiateBackend(SimulationBackend):
         background_selection_texture_path = scene_dir / scene_config.background["selection_texture"]
         background_size_km = scene_config.background["size_km"]
         
-        background_texture_image = Image.open(background_selection_texture_path)
+        with open_file(background_selection_texture_path, 'rb') as f:
+            background_texture_image = Image.open(f)
+            background_texture_image.load()
         background_selection_texture_data = np.array(background_texture_image)
         background_selection_texture_data = np.atleast_3d(background_selection_texture_data)
         
@@ -793,7 +802,8 @@ class EradiateBackend(SimulationBackend):
                     rgb_output = output_dir / f"{id_to_plot}_rgb.png"
                     plt_img = (img * 255).astype(np.uint8)
                     rgb_image = Image.fromarray(plt_img)
-                    rgb_image.save(rgb_output)
+                    with open_file(rgb_output, 'wb') as f:
+                        rgb_image.save(f, format='PNG')
                     
                     print(f"Camera RGB image saved to: {rgb_output}")
                     
@@ -820,7 +830,8 @@ class EradiateBackend(SimulationBackend):
             plt.title('Spectral Radiance')
             plt.grid(True, alpha=0.3)
             plt.tight_layout()
-            plt.savefig(output_path, dpi=150, bbox_inches='tight')
+            with open_file(output_path, 'wb') as f:
+                plt.savefig(f, format='png', dpi=150, bbox_inches='tight')
             plt.close()
             
         except ImportError:
