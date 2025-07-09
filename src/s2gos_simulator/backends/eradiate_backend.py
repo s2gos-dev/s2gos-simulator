@@ -720,51 +720,54 @@ class EradiateBackend(SimulationBackend):
         return result
     
     def _create_background_surface(self, scene_config, scene_dir: Path) -> Dict[str, Any]:
-        """Create background surface (reused from original backend)."""
+        """Create background surface using landcover-based selectbsdf (mirrors buffer system)."""
         elevation = scene_config.background["elevation"]
-        mask_texture_path = scene_dir / scene_config.background["mask_texture"]
+        background_selection_texture_path = scene_dir / scene_config.background["selection_texture"]
+        background_size_km = scene_config.background["size_km"]
         
-        material_name = scene_config.background.get("material", "water")
-        if not material_name.startswith("_mat_"):
-            material_id = f"_mat_{material_name}"
-        else:
-            material_id = material_name
-            
-        mask_edge_length = scene_config.background.get("mask_edge_length", 100000.0)
+        background_texture_image = Image.open(background_selection_texture_path)
+        background_selection_texture_data = np.array(background_texture_image)
+        background_selection_texture_data = np.atleast_3d(background_selection_texture_data)
         
-        shape_size = 1e9
-        scale = shape_size / mask_edge_length / 3.0
-        offset = -0.002
+        material_ids = [
+            "_mat_treecover", "_mat_shrubland", "_mat_grassland", "_mat_cropland",
+            "_mat_concrete", "_mat_baresoil", "_mat_snow", "_mat_water",
+            "_mat_wetland", "_mat_mangroves", "_mat_moss"
+        ]
         
-        to_world = mi.ScalarTransform4f.translate(
-            [0, 0, elevation + offset]
-        ) @ mi.ScalarTransform4f.scale(0.5 * shape_size)
-        
-        to_uv = mi.ScalarTransform4f.scale(
-            [scale, scale, 1]
-        ) @ mi.ScalarTransform4f.translate(
-            [0.5 * (1.0 / scale - 1.0), 0.5 * (1.0 / scale - 1.0), 0.0]
-        )
-        
-        return {
-            "background_surface": {
-                "type": "rectangle",
-                "to_world": to_world,
-                "bsdf": {
-                    "type": "mask",
-                    "opacity": {
-                        "type": "bitmap",
-                        "filename": str(mask_texture_path),
-                        "raw": True,
-                        "filter_type": "nearest",
-                        "wrap_mode": "clamp",
-                        "to_uv": to_uv,
-                    },
-                    "material": {"type": "ref", "id": material_id},
+        result = {
+            "background_material": {
+                "type": "selectbsdf",
+                "id": "background_material",
+                "indices": {
+                    "type": "bitmap",
+                    "raw": True,
+                    "filter_type": "nearest",
+                    "wrap_mode": "clamp",
+                    "data": background_selection_texture_data,
                 },
-                "id": "background_surface",
+                **{f"bsdf_{i:02d}": {"type": "ref", "id": mat_id}
+                   for i, mat_id in enumerate(material_ids)}
             }
         }
+        
+        scale_factor = (background_size_km * 1000) / 2.0
+        
+        to_world = mi.ScalarTransform4f.translate(
+            [0, 0, elevation]
+        ) @ mi.ScalarTransform4f.scale(scale_factor)
+        
+        result["background_surface"] = {
+            "type": "rectangle",
+            "to_world": to_world,
+            "bsdf": {
+                "type": "ref", 
+                "id": "background_material"
+            },
+            "id": "background_surface"
+        }
+        
+        return result
     
     def _create_rgb_visualization(self, experiment, output_dir: Path, id_to_plot: str):
         """Create RGB visualization from camera results."""
