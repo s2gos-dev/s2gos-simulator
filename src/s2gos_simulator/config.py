@@ -6,7 +6,7 @@ from enum import Enum
 from pydantic import BaseModel, Field, field_validator, model_validator
 import json
 import yaml
-from s2gos_generator.core.paths import read_json, open_file
+from s2gos_utils.io.paths import read_json, open_file
 
 
 class PlatformType(str, Enum):
@@ -533,9 +533,7 @@ class SimulationConfig(BaseModel):
     )
     
     # Advanced options
-    enable_noise: bool = Field(True, description="Enable noise modeling")
-    # Example metadata
-    # name: Annotated[str, Field(strict=True), WithJsonSchema({'extra': 'data'})]
+    enable_noise: bool = Field(False, description="Enable noise modeling")
     
     backend_hints: Dict[str, Any] = Field(
         default_factory=dict, 
