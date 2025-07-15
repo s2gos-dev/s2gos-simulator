@@ -1,5 +1,6 @@
 from pathlib import Path
-from typing import Optional, Dict, Any, List, Union
+from typing import Any, Dict, List, Optional, Union
+
 import numpy as np
 import xarray as xr
 from PIL import Image
@@ -8,23 +9,38 @@ from s2gos_utils.io.paths import open_file
 from .base import SimulationBackend
 from .eradiate_materials import EradiateMaterialAdapter
 from ..config import (
-    SimulationConfig, SatelliteSensor, UAVSensor, GroundSensor,
-    DirectionalIllumination, ConstantIllumination, MeasurementType,
-    PlatformType, AngularViewing, AngularFromOriginViewing, LookAtViewing, HemisphericalViewing,
-    UAVInstrumentType, GroundInstrumentType, SatellitePlatform, SatelliteInstrument
+    AngularFromOriginViewing,
+    ConstantIllumination,
+    DirectionalIllumination,
+    GroundInstrumentType,
+    GroundSensor,
+    HemisphericalViewing,
+    LookAtViewing,
+    MeasurementType,
+    PlatformType,
+    SatelliteInstrument,
+    SatellitePlatform,
+    SatelliteSensor,
+    SimulationConfig,
+    UAVInstrumentType,
+    UAVSensor,
 )
 
 try:
     import eradiate
+    import mitsuba as mi
     from eradiate.experiments import AtmosphereExperiment
+    from eradiate.scenes.atmosphere import (
+        ExponentialParticleDistribution,
+        GaussianParticleDistribution,
+        HeterogeneousAtmosphere,
+        HomogeneousAtmosphere,
+        MolecularAtmosphere,
+        ParticleLayer,
+        UniformParticleDistribution,
+    )
     from eradiate.units import unit_registry as ureg
     from eradiate.xarray.interp import dataarray_to_rgb
-    import mitsuba as mi
-    from eradiate.scenes.atmosphere import (
-        MolecularAtmosphere, HeterogeneousAtmosphere, HomogeneousAtmosphere, 
-        ParticleLayer, ExponentialParticleDistribution, 
-        GaussianParticleDistribution, UniformParticleDistribution
-    ) 
 
     ERADIATE_AVAILABLE = True
 except ImportError:
@@ -35,14 +51,14 @@ class EradiateBackend(SimulationBackend):
     """
     Enhanced Eradiate backend for the new configuration system.
     """
-    
+
     def __init__(self, simulation_config: SimulationConfig):
         """Initialize the Eradiate backend with new configuration system."""
         super().__init__(simulation_config)
-        
+
         eradiate_hints = simulation_config.backend_hints.get("eradiate", {})
         self._eradiate_mode = eradiate_hints.get("mode", "mono")
-        
+
         if ERADIATE_AVAILABLE:
             try:
                 eradiate.set_mode(self._eradiate_mode)
@@ -51,100 +67,136 @@ class EradiateBackend(SimulationBackend):
                     f"Failed to set Eradiate mode '{self._eradiate_mode}': {e}. "
                     f"Check if this mode is supported in your Eradiate installation."
                 )
-    
+
     def is_available(self) -> bool:
         """Check if Eradiate dependencies are available."""
         return ERADIATE_AVAILABLE
-    
+
     def _get_material_ids_from_scene(self, scene_config) -> List[str]:
         """Get material IDs from SceneDescription metadata.
-        
+
         Args:
             scene_config: SceneDescription object
-            
+
         Returns:
             List of material IDs with "_mat_" prefix in texture index order
         """
         if not scene_config.material_indices:
             raise ValueError("SceneDescription must contain 'material_indices'")
-        
+
         material_indices = scene_config.material_indices
-        
+
         # Generate material IDs with "_mat_" prefix, ordered by texture index
         material_ids = []
         for texture_index in sorted(material_indices.keys()):
             material_name = material_indices[texture_index]
             material_ids.append(f"_mat_{material_name}")
-        
+
         return material_ids
-    
+
     @property
     def supported_platforms(self) -> List[str]:
         """Eradiate supports all platform types."""
         return ["satellite", "uav", "ground"]
-    
+
     @property
     def supported_measurements(self) -> List[str]:
         """Measurement types supported by Eradiate."""
-        return ["radiance", "brf", "hdrf", "bhr", "bhr_iso", "fapar", "flux_3d", "irradiance", "dhp"]
-    
+        return [
+            "radiance",
+            "brf",
+            "hdrf",
+            "bhr",
+            "bhr_iso",
+            "fapar",
+            "flux_3d",
+            "irradiance",
+            "dhp",
+        ]
+
     def validate_configuration(self) -> List[str]:
         """Validate configuration for Eradiate backend."""
         errors = super().validate_configuration()
-        
+
         if not self.is_available():
-            errors.append("Eradiate is not available. Install with: pip install eradiate[kernel]")
-        
+            errors.append(
+                "Eradiate is not available. Install with: pip install eradiate[kernel]"
+            )
+
         valid_modes = {
-            "mono", "ckd", "mono_polarized", "ckd_polarized",
-            "mono_single", "mono_polarized_single", "mono_double", "mono_polarized_double",
-            "ckd_single", "ckd_polarized_single", "ckd_double", "ckd_polarized_double", "none"
+            "mono",
+            "ckd",
+            "mono_polarized",
+            "ckd_polarized",
+            "mono_single",
+            "mono_polarized_single",
+            "mono_double",
+            "mono_polarized_double",
+            "ckd_single",
+            "ckd_polarized_single",
+            "ckd_double",
+            "ckd_polarized_double",
+            "none",
         }
         if self._eradiate_mode not in valid_modes:
             errors.append(
                 f"Invalid Eradiate mode '{self._eradiate_mode}'. Valid modes: {sorted(valid_modes)}"
             )
-        
+
         for sensor in self.simulation_config.sensors:
             if sensor.platform_type == PlatformType.SATELLITE:
                 validation_error = self._validate_satellite_sensor(sensor)
                 if validation_error:
                     errors.append(validation_error)
             elif sensor.platform_type == PlatformType.GROUND:
-                if sensor.instrument not in [GroundInstrumentType.HYPSTAR, GroundInstrumentType.PERSPECTIVE_CAMERA, 
-                                           GroundInstrumentType.PYRANOMETER, GroundInstrumentType.FLUX_METER, 
-                                           GroundInstrumentType.DHP_CAMERA]:
-                    errors.append(f"Ground sensor {sensor.id} instrument type {sensor.instrument} is not supported")
-        
+                if sensor.instrument not in [
+                    GroundInstrumentType.HYPSTAR,
+                    GroundInstrumentType.PERSPECTIVE_CAMERA,
+                    GroundInstrumentType.PYRANOMETER,
+                    GroundInstrumentType.FLUX_METER,
+                    GroundInstrumentType.DHP_CAMERA,
+                ]:
+                    errors.append(
+                        f"Ground sensor {sensor.id} instrument type {sensor.instrument} is not supported"
+                    )
+
         for rq in self.simulation_config.radiative_quantities:
             if rq.quantity.value not in self.supported_measurements:
-                errors.append(f"Radiative quantity {rq.quantity} is not supported by Eradiate backend")
-            
-            if rq.quantity in [MeasurementType.BRF, MeasurementType.HDRF, MeasurementType.RADIANCE]:
+                errors.append(
+                    f"Radiative quantity {rq.quantity} is not supported by Eradiate backend"
+                )
+
+            if rq.quantity in [
+                MeasurementType.BRF,
+                MeasurementType.HDRF,
+                MeasurementType.RADIANCE,
+            ]:
                 if rq.viewing_zenith is None or rq.viewing_azimuth is None:
-                    errors.append(f"Radiative quantity {rq.quantity} requires viewing_zenith and viewing_azimuth")
-        
+                    errors.append(
+                        f"Radiative quantity {rq.quantity} requires viewing_zenith and viewing_azimuth"
+                    )
+
         return errors
-    
+
     def _validate_satellite_sensor(self, sensor) -> Optional[str]:
         """Validate satellite sensor platform/instrument/band combination using enum system."""
-        from ..config import PLATFORM_INSTRUMENTS, INSTRUMENT_BANDS, SatellitePlatform, SatelliteInstrument
-        
+        from ..config import INSTRUMENT_BANDS, PLATFORM_INSTRUMENTS
+
         if sensor.platform == SatellitePlatform.CUSTOM:
             if sensor.srf is None:
-                return f"Custom platform requires explicit SRF configuration"
+                return "Custom platform requires explicit SRF configuration"
             return None
-        
+
         try:
             platform_enum = SatellitePlatform(sensor.platform)
             instrument_enum = SatelliteInstrument(sensor.instrument)
         except ValueError as e:
             return f"Invalid platform or instrument: {e}"
-        
+
         valid_instruments = PLATFORM_INSTRUMENTS.get(platform_enum, [])
         if instrument_enum not in valid_instruments:
             return f"Platform '{sensor.platform}' does not support instrument '{sensor.instrument}'. Valid instruments: {[inst.value for inst in valid_instruments]}"
-        
+
         band_enum_class = INSTRUMENT_BANDS.get(instrument_enum)
         if band_enum_class is not None:
             try:
@@ -152,49 +204,59 @@ class EradiateBackend(SimulationBackend):
             except ValueError:
                 valid_bands = [band.value for band in band_enum_class]
                 return f"Instrument '{sensor.platform}/{sensor.instrument}' does not support band '{sensor.band}'. Valid bands: {valid_bands}"
-        
+
         return None
-    
-    def run_simulation(self, scene_config, scene_dir: Path, 
-                      output_dir: Optional[Path] = None, 
-                      **kwargs) -> xr.Dataset:
+
+    def run_simulation(
+        self, scene_config, scene_dir: Path, output_dir: Optional[Path] = None, **kwargs
+    ) -> xr.Dataset:
         """Run Eradiate simulation with new configuration system."""
         if not self.is_available():
             raise RuntimeError("Eradiate is not available")
-        
+
         if output_dir is None:
             output_dir = scene_dir / "eradiate_renders"
-        
+
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
-        
+
         print(f"Running Eradiate simulation: {self.simulation_config.name}")
         print(f"Sensors: {len(self.simulation_config.sensors)}")
-        print(f"Radiative quantities: {len(self.simulation_config.radiative_quantities)}")
-        print(f"Measurement types: {[mt.value for mt in self.simulation_config.output_quantities]}")
-        
-        
+        print(
+            f"Radiative quantities: {len(self.simulation_config.radiative_quantities)}"
+        )
+        print(
+            f"Measurement types: {[mt.value for mt in self.simulation_config.output_quantities]}"
+        )
+
         experiment = self._create_experiment(scene_config, scene_dir)
-        
+
         print("Executing Eradiate simulation...")
         eradiate.run(experiment)
-        
-        plot_image = kwargs.get('plot_image', False)
+
+        plot_image = kwargs.get("plot_image", False)
         if plot_image:
-            self._create_rgb_visualization(experiment, output_dir, kwargs.get('id_to_plot', 'rgb_camera'))
-        
+            self._create_rgb_visualization(
+                experiment, output_dir, kwargs.get("id_to_plot", "rgb_camera")
+            )
+
         return self._process_results(experiment, output_dir)
-    
+
     def _create_experiment(self, scene_config, scene_dir: Path):
         """Create Eradiate experiment from new configuration system."""
         kdict = {}
         kpmap = {}
         adapter = EradiateMaterialAdapter()
-        
+
         for mat_name, material in scene_config.materials.items():
             # Use adapter pattern to create Eradiate-specific dictionaries
-            from s2gos_utils.scene.materials import DiffuseMaterial, BilambertianMaterial, RPVMaterial, OceanLegacyMaterial
-            
+            from s2gos_utils.scene.materials import (
+                BilambertianMaterial,
+                DiffuseMaterial,
+                OceanLegacyMaterial,
+                RPVMaterial,
+            )
+
             if isinstance(material, DiffuseMaterial):
                 mat_kdict = adapter.create_diffuse_kdict(material)
                 mat_kpmap = adapter.create_diffuse_kpmap(material)
@@ -211,32 +273,31 @@ class EradiateBackend(SimulationBackend):
                 # Fallback - assume diffuse
                 mat_kdict = adapter.create_diffuse_kdict(material)
                 mat_kpmap = adapter.create_diffuse_kpmap(material)
-                
+
             kdict.update(mat_kdict)
             kpmap.update(mat_kpmap)
-        
+
         # Get surface configurations from SceneDescription proper fields
-        target = scene_config.target
-        buffer = scene_config.buffer 
+        buffer = scene_config.buffer
         background = scene_config.background
-        
+
         # Create surfaces using SceneDescription
         kdict.update(self._create_target_surface(scene_config, scene_dir))
-        
+
         if buffer:
             kdict.update(self._create_buffer_surface(scene_config, scene_dir))
-        
+
         if background:
             kdict.update(self._create_background_surface(scene_config, scene_dir))
-        
+
         atmosphere = self._create_atmosphere_from_config(scene_config)
-        
+
         illumination = self._translate_illumination()
-        
+
         measures = self._translate_sensors()
-        
+
         geometry = self._create_geometry_from_atmosphere(scene_config)
-        
+
         return AtmosphereExperiment(
             geometry=geometry,
             atmosphere=atmosphere,
@@ -244,29 +305,31 @@ class EradiateBackend(SimulationBackend):
             illumination=illumination,
             measures=measures,
             kdict=kdict,
-            kpmap=kpmap
+            kpmap=kpmap,
         )
-    
+
     def _create_geometry_from_atmosphere(self, scene_config):
         """Create geometry with bounds matching the atmosphere configuration."""
         atmosphere = scene_config.atmosphere
-        toa = atmosphere["toa"] if "toa" in atmosphere else 40000.0  # Top of atmosphere (meters)
-        
+        toa = (
+            atmosphere["toa"] if "toa" in atmosphere else 40000.0
+        )  # Top of atmosphere (meters)
+
         geometry = {
             "type": "plane_parallel",
             "toa_altitude": toa,
         }
-        
+
         return geometry
-    
+
     def _create_atmosphere_from_config(self, scene_config):
         """Create atmosphere based on scene description format."""
         atmosphere = scene_config.atmosphere
         atmosphere_type = atmosphere["type"] if "type" in atmosphere else None
-        
+
         if not atmosphere_type:
             raise ValueError("Atmosphere configuration must specify 'type' field")
-        
+
         if atmosphere_type == "molecular":
             return self._create_molecular_atmosphere_from_scene(atmosphere)
         elif atmosphere_type == "homogeneous":
@@ -275,34 +338,36 @@ class EradiateBackend(SimulationBackend):
             return self._create_heterogeneous_atmosphere_from_scene(atmosphere)
         else:
             raise ValueError(f"Unknown atmosphere type: {atmosphere_type}")
-    
+
     def _create_molecular_atmosphere_from_dict(self, mol_dict):
         """Create molecular atmosphere directly from scene description data."""
         thermoprops_id = mol_dict.get("thermoprops_identifier", "afgl_1986-us_standard")
         altitude_min = mol_dict.get("altitude_min", 0.0)
         altitude_max = mol_dict.get("altitude_max", 120000.0)
-        num_steps = ((altitude_max-altitude_min) / mol_dict.get("altitude_step", 1000)) + 1
-        
-        
+        num_steps = (
+            (altitude_max - altitude_min) / mol_dict.get("altitude_step", 1000)
+        ) + 1
+
         atmosphere = MolecularAtmosphere(
             thermoprops={
                 "identifier": thermoprops_id,
-                "z": np.linspace(altitude_min, altitude_max, int(num_steps)) * ureg.m
+                "z": np.linspace(altitude_min, altitude_max, int(num_steps)) * ureg.m,
             },
             has_absorption=mol_dict.get("has_absorption", True),
-            has_scattering=mol_dict.get("has_scattering", True)
+            has_scattering=mol_dict.get("has_scattering", True),
         )
-        
+
         return atmosphere
-            
-    
+
     def _create_particle_layer_from_dict(self, layer_dict):
-        """Create particle layer directly from scene description data."""        
+        """Create particle layer directly from scene description data."""
         dist_type = layer_dict.get("distribution_type", "exponential")
         if dist_type == "exponential":
             if "rate" in layer_dict.keys():
                 if "scale" in layer_dict.keys():
-                    print("WARNING: scale and rate should be mutually exclusive in exponential distribution, using rate")
+                    print(
+                        "WARNING: scale and rate should be mutually exclusive in exponential distribution, using rate"
+                    )
                 distribution = ExponentialParticleDistribution(
                     scale=layer_dict.get("rate", 5.0)
                 )
@@ -313,13 +378,13 @@ class EradiateBackend(SimulationBackend):
         elif dist_type == "gaussian":
             distribution = GaussianParticleDistribution(
                 mean=layer_dict.get("center_altitude", 0.5),
-                std=layer_dict.get("width", 1/6)
+                std=layer_dict.get("width", 1 / 6),
             )
         else:
             distribution = UniformParticleDistribution(
-                {"bounds": layer_dict.get("bounds", [0,1])}
+                {"bounds": layer_dict.get("bounds", [0, 1])}
             )
-        
+
         # Create particle layer using direct Eradiate API
         layer = ParticleLayer(
             dataset=layer_dict["aerosol_dataset"],
@@ -328,11 +393,11 @@ class EradiateBackend(SimulationBackend):
             bottom=layer_dict["altitude_bottom"],
             top=layer_dict["altitude_top"],
             distribution=distribution,
-            has_absorption=layer_dict.get("has_absorption", True)
+            has_absorption=layer_dict.get("has_absorption", True),
         )
-        
+
         return layer
-    
+
     def _create_molecular_atmosphere_from_scene(self, atmosphere_dict):
         """Create molecular atmosphere from scene description."""
         if "molecular_atmosphere" in atmosphere_dict:
@@ -341,7 +406,7 @@ class EradiateBackend(SimulationBackend):
         else:
             # Default molecular atmosphere
             return self._create_molecular_atmosphere_from_dict({})
-    
+
     def _create_homogeneous_atmosphere_from_scene(self, atmosphere_dict):
         """Create homogeneous atmosphere from scene description."""
         atmosphere = HomogeneousAtmosphere(
@@ -353,45 +418,48 @@ class EradiateBackend(SimulationBackend):
                     optical_thickness=atmosphere_dict.get("aerosol_ot", 0.1),
                     altitude_bottom=atmosphere_dict.get("boa", 0.0),
                     altitude_top=atmosphere_dict.get("toa", 40000.0),
-                    reference_wavelength=550.0
+                    reference_wavelength=550.0,
                 )
-            ]
+            ],
         )
-        
+
         return atmosphere
-    
-    
+
     def _create_heterogeneous_atmosphere_from_scene(self, atmosphere_dict):
         """Create heterogeneous atmosphere from scene description."""
-        has_molecular = atmosphere_dict.get("has_molecular_atmosphere", False) or "molecular_atmosphere" in atmosphere_dict
-        has_particles = atmosphere_dict.get("has_particle_layers", False) or "particle_layers" in atmosphere_dict
-        
+        has_molecular = (
+            atmosphere_dict.get("has_molecular_atmosphere", False)
+            or "molecular_atmosphere" in atmosphere_dict
+        )
+        has_particles = (
+            atmosphere_dict.get("has_particle_layers", False)
+            or "particle_layers" in atmosphere_dict
+        )
+
         molecular_atmosphere = None
         particle_layers = []
-        
+
         if has_molecular:
             mol_dict = atmosphere_dict["molecular_atmosphere"]
             molecular_atmosphere = self._create_molecular_atmosphere_from_dict(mol_dict)
-        
+
         if has_particles:
             for layer_dict in atmosphere_dict["particle_layers"]:
                 layer = self._create_particle_layer_from_dict(layer_dict)
                 if layer:
                     particle_layers.append(layer)
-        
+
         # Create heterogeneous atmosphere using direct Eradiate API
         atmosphere = HeterogeneousAtmosphere(
-            molecular_atmosphere=molecular_atmosphere,
-            particle_layers=particle_layers
+            molecular_atmosphere=molecular_atmosphere, particle_layers=particle_layers
         )
-        
+
         return atmosphere
-        
-    
+
     def _translate_illumination(self) -> Dict[str, Any]:
         """Translate generic illumination to Eradiate format."""
         illumination = self.simulation_config.illumination
-        
+
         if isinstance(illumination, DirectionalIllumination):
             return {
                 "type": "directional",
@@ -400,43 +468,47 @@ class EradiateBackend(SimulationBackend):
                 "azimuth": illumination.azimuth * ureg.deg,
                 "irradiance": {
                     "type": "solar_irradiance",
-                    "dataset": illumination.irradiance_dataset
-                }
+                    "dataset": illumination.irradiance_dataset,
+                },
             }
         elif isinstance(illumination, ConstantIllumination):
             return {
                 "type": "constant",
                 "id": illumination.id,
-                "radiance": illumination.radiance
+                "radiance": illumination.radiance,
             }
         else:
             raise ValueError(f"Unsupported illumination type: {type(illumination)}")
-    
-    def _calculate_target_from_angles(self, view: AngularFromOriginViewing) -> tuple[list[float], list[float]]:
+
+    def _calculate_target_from_angles(
+        self, view: AngularFromOriginViewing
+    ) -> tuple[list[float], list[float]]:
         """
         Calculates a target point and direction vector from an AngularFromOriginViewing object.
-        
+
         Returns:
             A tuple containing (target_position, direction_vector).
         """
         zen_rad = np.deg2rad(view.zenith)
         az_rad = np.deg2rad(view.azimuth)
-        
-        direction = np.array([
-            np.sin(zen_rad) * np.cos(az_rad),
-            np.sin(zen_rad) * np.sin(az_rad),
-            np.cos(zen_rad)
-        ])
-        
+
+        direction = np.array(
+            [
+                np.sin(zen_rad) * np.cos(az_rad),
+                np.sin(zen_rad) * np.sin(az_rad),
+                np.cos(zen_rad),
+            ]
+        )
+
         origin_vec = np.array(view.origin)
         target_vec = origin_vec + direction
-        
+
         return target_vec.tolist(), direction.tolist()
 
     def _translate_sensors(self) -> List[Dict[str, Any]]:
         """Translate generic sensors and radiative quantities to Eradiate measures."""
         measures = []
-        
+
         # Translate sensor-based measures
         for sensor in self.simulation_config.sensors:
             if isinstance(sensor, SatelliteSensor):
@@ -447,11 +519,11 @@ class EradiateBackend(SimulationBackend):
                 measures.append(self._translate_ground_sensor(sensor))
             else:
                 raise ValueError(f"Unsupported sensor type: {type(sensor)}")
-        
+
         # Translate radiative quantity measures
         for rad_quantity in self.simulation_config.radiative_quantities:
             measures.append(self._translate_radiative_quantity(rad_quantity))
-        
+
         return measures
 
     def _translate_satellite_sensor(self, sensor: SatelliteSensor) -> Dict[str, Any]:
@@ -462,12 +534,12 @@ class EradiateBackend(SimulationBackend):
             "spp": sensor.samples_per_pixel,
             "srf": self._translate_srf(sensor.srf),
             "construct": "from_angles",
-            "angles": [sensor.viewing.zenith, sensor.viewing.azimuth]
+            "angles": [sensor.viewing.zenith, sensor.viewing.azimuth],
         }
-        
+
         if sensor.viewing.target:
             measure_config["target"] = sensor.viewing.target
-        
+
         return measure_config
 
     def _translate_uav_sensor(self, sensor: UAVSensor) -> Dict[str, Any]:
@@ -485,7 +557,7 @@ class EradiateBackend(SimulationBackend):
             base_config["type"] = "perspective"
             base_config["fov"] = sensor.fov or 70.0
             base_config["film_resolution"] = sensor.resolution or [1024, 1024]
-            
+
             if isinstance(view, LookAtViewing):
                 base_config["target"] = view.target
                 base_config["up"] = view.up or [0, 0, 1]
@@ -496,13 +568,13 @@ class EradiateBackend(SimulationBackend):
 
         elif sensor.instrument == UAVInstrumentType.RADIANCEMETER:
             base_config["type"] = "radiancemeter"
-            
+
             if isinstance(view, LookAtViewing):
                 base_config["target"] = view.target
             elif isinstance(view, AngularFromOriginViewing):
                 target, _ = self._calculate_target_from_angles(view)
                 base_config["target"] = target
-        
+
         else:
             raise ValueError(f"Unsupported UAV instrument type: {sensor.instrument}")
 
@@ -521,64 +593,69 @@ class EradiateBackend(SimulationBackend):
         if isinstance(view, HemisphericalViewing):
             base_measure["type"] = "hdistant"
             base_measure["direction"] = [0, 0, 1] if view.upward_looking else [0, 0, -1]
-            
+
         elif isinstance(view, (LookAtViewing, AngularFromOriginViewing)):
             base_measure["origin"] = view.origin
 
-            if sensor.instrument in [GroundInstrumentType.PERSPECTIVE_CAMERA, GroundInstrumentType.DHP_CAMERA]:
+            if sensor.instrument in [
+                GroundInstrumentType.PERSPECTIVE_CAMERA,
+                GroundInstrumentType.DHP_CAMERA,
+            ]:
                 base_measure["type"] = "perspective"
                 base_measure["film_resolution"] = [1024, 1024]
-                base_measure["fov"] = 180.0 if sensor.instrument == GroundInstrumentType.DHP_CAMERA else 70.0
+                base_measure["fov"] = (
+                    180.0
+                    if sensor.instrument == GroundInstrumentType.DHP_CAMERA
+                    else 70.0
+                )
                 base_measure["up"] = view.up or [0, 0, 1]
             else:
                 base_measure["type"] = "radiancemeter"
 
             if isinstance(view, LookAtViewing):
                 base_measure["target"] = view.target
-                
+
             elif isinstance(view, AngularFromOriginViewing):
                 target, _ = self._calculate_target_from_angles(view)
                 base_measure["target"] = target
         else:
-            raise ValueError(f"Unsupported viewing type for ground sensor: {type(view)}")
+            raise ValueError(
+                f"Unsupported viewing type for ground sensor: {type(view)}"
+            )
 
         return base_measure
-    
+
     def _translate_radiative_quantity(self, rad_quantity) -> Dict[str, Any]:
         """Translate radiative quantity configuration to placeholder measure.
-        
+
         TODO: This is a placeholder implementation. Future versions will:
         1. Determine appropriate sensors needed for the radiative quantity
         2. Instantiate those sensors internally
         3. Calculate the requested quantity from sensor results
         """
-        from ..config import MeasurementType
-        
+
         quantity_id = f"{rad_quantity.quantity.value}_measure"
-        
+
         # Log TODO message for user clarity
-        print(f"TODO: {rad_quantity.quantity.value.upper()} calculation not yet implemented - generating placeholder")
-        
+        print(
+            f"TODO: {rad_quantity.quantity.value.upper()} calculation not yet implemented - generating placeholder"
+        )
+
         base_config = {
             "id": quantity_id,
             "type": "distant",
-            "construct": "from_angles", 
+            "construct": "from_angles",
             "angles": [0.0, 0.0],  # Nadir view as placeholder
             "spp": rad_quantity.samples_per_pixel,
-            "srf": self._translate_srf(rad_quantity.srf)
+            "srf": self._translate_srf(rad_quantity.srf),
         }
-        
+
         return base_config
-        
+
     def _translate_srf(self, srf) -> Union[Dict[str, Any], str]:
         """Translate generic SRF to Eradiate format."""
         if srf is None:
-            return {
-                "type": "uniform",
-                "wmin": 400.0,
-                "wmax": 700.0,
-                "value": 1.0
-            }
+            return {"type": "uniform", "wmin": 400.0, "wmax": 700.0, "value": 1.0}
         elif isinstance(srf, str):
             return srf
         elif isinstance(srf, dict):
@@ -586,16 +663,13 @@ class EradiateBackend(SimulationBackend):
         else:
             # From config
             if srf.type == "delta":
-                return {
-                    "type": "delta",
-                    "wavelengths": srf.wavelengths
-                }
+                return {"type": "delta", "wavelengths": srf.wavelengths}
             elif srf.type == "uniform":
                 return {
                     "type": "uniform",
                     "wmin": srf.wmin,
                     "wmax": srf.wmax,
-                    "value": 1.0
+                    "value": 1.0,
                 }
             elif srf.type == "dataset":
                 return srf.dataset_id
@@ -604,58 +678,66 @@ class EradiateBackend(SimulationBackend):
                     return {
                         "type": "array",
                         "wavelengths": srf.data["wavelengths"],
-                        "values": srf.data["values"]
+                        "values": srf.data["values"],
                     }
                 else:
-                    raise ValueError("Custom SRF requires 'wavelengths' and 'values' in data")
+                    raise ValueError(
+                        "Custom SRF requires 'wavelengths' and 'values' in data"
+                    )
             else:
                 raise ValueError(f"Unsupported SRF type: {srf.type}")
-    
+
     def _resolve_platform_srf(self, platform: str, instrument: str, band: str) -> str:
         """
         Resolve platform/instrument/band combination to Eradiate SRF identifier.
-        
+
         This method converts platform identifiers to Eradiate dataset identifiers.
         """
-        platform_norm = platform.lower().replace('-', '_')
+        platform_norm = platform.lower().replace("-", "_")
         instrument_norm = instrument.lower()
         band_norm = band.lower()
-        
+
         srf_id = f"{platform_norm}-{instrument_norm}-{band_norm}"
-        
+
         return srf_id
-    
+
     def _create_output_metadata(self, output_dir: Path) -> Dict[str, Any]:
         """Create standardized metadata for output files."""
         return {
-            'simulation_name': self.simulation_config.name,
-            'description': self.simulation_config.description,
-            'created_at': self.simulation_config.created_at.isoformat(),
-            'backend': 'eradiate',
-            'output_dir': str(output_dir),
-            'num_sensors': len(self.simulation_config.sensors),
-            'num_radiative_quantities': len(self.simulation_config.radiative_quantities),
-            'sensor_types': [s.platform_type.value for s in self.simulation_config.sensors],
-            'radiative_quantities': [rq.quantity.value for rq in self.simulation_config.radiative_quantities],
-            'illumination_type': self.simulation_config.illumination.type
+            "simulation_name": self.simulation_config.name,
+            "description": self.simulation_config.description,
+            "created_at": self.simulation_config.created_at.isoformat(),
+            "backend": "eradiate",
+            "output_dir": str(output_dir),
+            "num_sensors": len(self.simulation_config.sensors),
+            "num_radiative_quantities": len(
+                self.simulation_config.radiative_quantities
+            ),
+            "sensor_types": [
+                s.platform_type.value for s in self.simulation_config.sensors
+            ],
+            "radiative_quantities": [
+                rq.quantity.value for rq in self.simulation_config.radiative_quantities
+            ],
+            "illumination_type": self.simulation_config.illumination.type,
         }
-    
+
     # Legacy compatibility methods removed - using pure SceneDescription access
-    
+
     def _create_target_surface(self, scene_config, scene_dir: Path) -> Dict[str, Any]:
         """Create target surface from SceneDescription."""
         target_config = scene_config.target
         target_mesh_path = scene_dir / target_config["mesh"]
         target_texture_path = scene_dir / target_config["selection_texture"]
-        
-        with open_file(target_texture_path, 'rb') as f:
+
+        with open_file(target_texture_path, "rb") as f:
             texture_image = Image.open(f)
             texture_image.load()
         selection_texture_data = np.array(texture_image)
         selection_texture_data = np.atleast_3d(selection_texture_data)
-        
+
         material_ids = self._get_material_ids_from_scene(scene_config)
-        
+
         return {
             "terrain_material": {
                 "type": "selectbsdf",
@@ -667,32 +749,38 @@ class EradiateBackend(SimulationBackend):
                     "wrap_mode": "clamp",
                     "data": selection_texture_data,
                 },
-                **{f"bsdf_{i:02d}": {"type": "ref", "id": mat_id}
-                for i, mat_id in enumerate(material_ids)}
+                **{
+                    f"bsdf_{i:02d}": {"type": "ref", "id": mat_id}
+                    for i, mat_id in enumerate(material_ids)
+                },
             },
             "terrain": {
                 "type": "ply",
                 "filename": str(target_mesh_path),
                 "bsdf": {"type": "ref", "id": "terrain_material"},
-                "id": "terrain"
-            }
+                "id": "terrain",
+            },
         }
-    
+
     def _create_buffer_surface(self, scene_config, scene_dir: Path) -> Dict[str, Any]:
         """Create buffer surface from SceneDescription."""
         buffer_config = scene_config.buffer
         buffer_mesh_path = scene_dir / buffer_config["mesh"]
         buffer_texture_path = scene_dir / buffer_config["selection_texture"]
-        mask_path = scene_dir / buffer_config["mask_texture"] if "mask_texture" in buffer_config else None
-        
-        with open_file(buffer_texture_path, 'rb') as f:
+        mask_path = (
+            scene_dir / buffer_config["mask_texture"]
+            if "mask_texture" in buffer_config
+            else None
+        )
+
+        with open_file(buffer_texture_path, "rb") as f:
             buffer_texture_image = Image.open(f)
             buffer_texture_image.load()
         buffer_selection_texture_data = np.array(buffer_texture_image)
         buffer_selection_texture_data = np.atleast_3d(buffer_selection_texture_data)
-        
+
         material_ids = self._get_material_ids_from_scene(scene_config)
-        
+
         result = {
             "buffer_material": {
                 "type": "selectbsdf",
@@ -704,20 +792,22 @@ class EradiateBackend(SimulationBackend):
                     "wrap_mode": "clamp",
                     "data": buffer_selection_texture_data,
                 },
-                **{f"bsdf_{i:02d}": {"type": "ref", "id": mat_id}
-                   for i, mat_id in enumerate(material_ids)}
+                **{
+                    f"bsdf_{i:02d}": {"type": "ref", "id": mat_id}
+                    for i, mat_id in enumerate(material_ids)
+                },
             }
         }
-        
+
         buffer_bsdf_id = "buffer_material"
-        
+
         if mask_path and Path(mask_path).exists():
-            with open_file(mask_path, 'rb') as f:
+            with open_file(mask_path, "rb") as f:
                 mask_image = Image.open(f)
                 mask_image.load()
             mask_data = np.array(mask_image) / 255.0
             mask_data = np.atleast_3d(mask_data)
-            
+
             result["buffer_mask"] = {
                 "type": "mask",
                 "opacity": {
@@ -727,34 +817,40 @@ class EradiateBackend(SimulationBackend):
                     "wrap_mode": "clamp",
                     "data": mask_data,
                 },
-                "material": {"type": "ref", "id": "buffer_material"}
+                "material": {"type": "ref", "id": "buffer_material"},
             }
             buffer_bsdf_id = "buffer_mask"
-        
+
         result["buffer_terrain"] = {
             "type": "ply",
             "filename": str(buffer_mesh_path),
             "bsdf": {"type": "ref", "id": buffer_bsdf_id},
-            "id": "buffer_terrain"
+            "id": "buffer_terrain",
         }
-        
+
         return result
-    
-    def _create_background_surface(self, scene_config, scene_dir: Path) -> Dict[str, Any]:
+
+    def _create_background_surface(
+        self, scene_config, scene_dir: Path
+    ) -> Dict[str, Any]:
         """Create background surface from SceneDescription."""
         background_config = scene_config.background
         elevation = background_config["elevation"]
-        background_selection_texture_path = scene_dir / background_config["selection_texture"]
+        background_selection_texture_path = (
+            scene_dir / background_config["selection_texture"]
+        )
         background_size_km = background_config["size_km"]
-        
-        with open_file(background_selection_texture_path, 'rb') as f:
+
+        with open_file(background_selection_texture_path, "rb") as f:
             background_texture_image = Image.open(f)
             background_texture_image.load()
         background_selection_texture_data = np.array(background_texture_image)
-        background_selection_texture_data = np.atleast_3d(background_selection_texture_data)
-        
+        background_selection_texture_data = np.atleast_3d(
+            background_selection_texture_data
+        )
+
         material_ids = self._get_material_ids_from_scene(scene_config)
-        
+
         result = {
             "background_material": {
                 "type": "selectbsdf",
@@ -766,184 +862,193 @@ class EradiateBackend(SimulationBackend):
                     "wrap_mode": "clamp",
                     "data": background_selection_texture_data,
                 },
-                **{f"bsdf_{i:02d}": {"type": "ref", "id": mat_id}
-                   for i, mat_id in enumerate(material_ids)}
+                **{
+                    f"bsdf_{i:02d}": {"type": "ref", "id": mat_id}
+                    for i, mat_id in enumerate(material_ids)
+                },
             }
         }
-        
+
         scale_factor = (background_size_km * 1000) / 2.0
-        
+
         to_world = mi.ScalarTransform4f.translate(
             [0, 0, elevation]
         ) @ mi.ScalarTransform4f.scale(scale_factor)
-        
+
         result["background_surface"] = {
             "type": "rectangle",
             "to_world": to_world,
-            "bsdf": {
-                "type": "ref", 
-                "id": "background_material"
-            },
-            "id": "background_surface"
+            "bsdf": {"type": "ref", "id": "background_material"},
+            "id": "background_surface",
         }
-        
+
         return result
-    
+
     def _create_rgb_visualization(self, experiment, output_dir: Path, id_to_plot: str):
         """Create RGB visualization from camera results."""
         try:
             if id_to_plot not in experiment.results:
                 print(f"Warning: Sensor '{id_to_plot}' not found in results")
                 return
-                
+
             sensor_data = experiment.results[id_to_plot]
-            
+
             if "radiance" in sensor_data:
                 radiance_data = sensor_data["radiance"]
-                
+
                 if "x_index" in radiance_data.dims and "y_index" in radiance_data.dims:
-                    img = dataarray_to_rgb(
-                        radiance_data,
-                        channels=[("w", 660), ("w", 550), ("w", 440)],
-                        normalize=False,
-                    ) * 1.8
-                    
+                    img = (
+                        dataarray_to_rgb(
+                            radiance_data,
+                            channels=[("w", 660), ("w", 550), ("w", 440)],
+                            normalize=False,
+                        )
+                        * 1.8
+                    )
+
                     img = np.clip(img, 0, 1)
-                    
+
                     rgb_output = output_dir / f"{id_to_plot}_rgb.png"
                     plt_img = (img * 255).astype(np.uint8)
                     rgb_image = Image.fromarray(plt_img)
-                    with open_file(rgb_output, 'wb') as f:
-                        rgb_image.save(f, format='PNG')
-                    
+                    with open_file(rgb_output, "wb") as f:
+                        rgb_image.save(f, format="PNG")
+
                     print(f"Camera RGB image saved to: {rgb_output}")
-                    
+
                 else:
                     spectral_output = output_dir / f"{id_to_plot}_spectrum.png"
                     self._plot_spectral_data(radiance_data, spectral_output)
                     print(f"Spectral data plot saved to: {spectral_output}")
-                    
+
         except Exception as e:
             print(f"Warning: Could not create visualization for {id_to_plot}: {e}")
-    
+
     def _plot_spectral_data(self, radiance_data, output_path: Path):
         """Plot spectral data for point sensors."""
         try:
             import matplotlib.pyplot as plt
-            
+
             wavelengths = radiance_data.coords["w"].values
             radiance_values = radiance_data.values
-            
+
             plt.figure(figsize=(10, 6))
-            plt.plot(wavelengths, radiance_values, 'b-', linewidth=2)
-            plt.xlabel('Wavelength (nm)')
-            plt.ylabel('Radiance')
-            plt.title('Spectral Radiance')
+            plt.plot(wavelengths, radiance_values, "b-", linewidth=2)
+            plt.xlabel("Wavelength (nm)")
+            plt.ylabel("Radiance")
+            plt.title("Spectral Radiance")
             plt.grid(True, alpha=0.3)
             plt.tight_layout()
-            with open_file(output_path, 'wb') as f:
-                plt.savefig(f, format='png', dpi=150, bbox_inches='tight')
+            with open_file(output_path, "wb") as f:
+                plt.savefig(f, format="png", dpi=150, bbox_inches="tight")
             plt.close()
-            
+
         except ImportError:
             print("Warning: matplotlib not available for spectral plotting")
         except Exception as e:
             print(f"Warning: Could not create spectral plot: {e}")
-    
+
     def _process_results(self, experiment, output_dir: Path) -> xr.Dataset:
         """Process and save simulation results."""
         results = experiment.results
-        
+
         if not results:
             raise ValueError("No results found in experiment")
-        
+
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
-        
+
         metadata = self._create_output_metadata(output_dir)
-        
+
         # Process regular sensor results
         if isinstance(results, dict):
             for sensor_id, dataset in results.items():
-                sensor_output = output_dir / f"{self.simulation_config.name}_{sensor_id}.zarr"
-                
+                sensor_output = (
+                    output_dir / f"{self.simulation_config.name}_{sensor_id}.zarr"
+                )
+
                 dataset.attrs.update(metadata)
-                dataset.attrs['sensor_id'] = sensor_id
-                
+                dataset.attrs["sensor_id"] = sensor_id
+
                 dataset.to_zarr(sensor_output, mode="w")
                 print(f"Sensor '{sensor_id}' saved to {sensor_output}")
-            
+
         else:
             results_ds = results
             single_output = output_dir / f"{self.simulation_config.name}_results.zarr"
             results_ds.attrs.update(metadata)
             results_ds.to_zarr(single_output, mode="w")
             print(f"Results saved to {single_output}")
-        
+
         # Generate dummy results for radiative quantities (TODO placeholders)
         for rad_quantity in self.simulation_config.radiative_quantities:
-            dummy_output = self._create_dummy_radiative_quantity_result(rad_quantity, output_dir, metadata)
-            print(f"TODO: {rad_quantity.quantity.value.upper()} placeholder saved to {dummy_output}")
-        
+            dummy_output = self._create_dummy_radiative_quantity_result(
+                rad_quantity, output_dir, metadata
+            )
+            print(
+                f"TODO: {rad_quantity.quantity.value.upper()} placeholder saved to {dummy_output}"
+            )
+
         return results
-    
-    def _create_dummy_radiative_quantity_result(self, rad_quantity, output_dir: Path, metadata: dict) -> Path:
+
+    def _create_dummy_radiative_quantity_result(
+        self, rad_quantity, output_dir: Path, metadata: dict
+    ) -> Path:
         """Create dummy Zarr file for radiative quantity placeholder.
-        
+
         TODO: This creates placeholder data. Future implementation will:
-        1. Use results from appropriate sensors 
+        1. Use results from appropriate sensors
         2. Calculate the actual radiative quantity
         3. Return real calculated values
         """
         import numpy as np
-        
+
         quantity_id = f"{rad_quantity.quantity.value}_measure"
         dummy_output = output_dir / f"{self.simulation_config.name}_{quantity_id}.zarr"
-        
-        # Create dummy data 
+
+        # Create dummy data
         dummy_data = np.ones((10, 10)) * 0.5
 
         wavelengths = [550.0]  # Set a default value
         srf = rad_quantity.srf
         if srf.type == "delta" and srf.wavelengths:
             wavelengths = srf.wavelengths
-        
+
         # Create xarray dataset with appropriate structure
         if len(wavelengths) > 1:
             # Multi-spectral data
             dummy_values = np.stack([dummy_data for _ in wavelengths], axis=0)
             coords = {
-                'wavelength': ('wavelength', wavelengths),
-                'x': ('x', np.arange(10)),
-                'y': ('y', np.arange(10))
+                "wavelength": ("wavelength", wavelengths),
+                "x": ("x", np.arange(10)),
+                "y": ("y", np.arange(10)),
             }
-            dims = ['wavelength', 'y', 'x']
+            dims = ["wavelength", "y", "x"]
         else:
             # Single wavelength
             dummy_values = dummy_data
-            coords = {
-                'x': ('x', np.arange(10)),
-                'y': ('y', np.arange(10))
-            }
-            dims = ['y', 'x']
-        
+            coords = {"x": ("x", np.arange(10)), "y": ("y", np.arange(10))}
+            dims = ["y", "x"]
+
         # Create dataset
-        dummy_dataset = xr.Dataset({
-            rad_quantity.quantity.value: (dims, dummy_values)
-        }, coords=coords)
-        
+        dummy_dataset = xr.Dataset(
+            {rad_quantity.quantity.value: (dims, dummy_values)}, coords=coords
+        )
+
         # Add metadata
         dummy_dataset.attrs.update(metadata)
-        dummy_dataset.attrs.update({
-            'radiative_quantity': rad_quantity.quantity.value,
-            'status': 'TODO_PLACEHOLDER',
-            'description': f'Placeholder data for {rad_quantity.quantity.value} calculation',
-            'samples_per_pixel': rad_quantity.samples_per_pixel,
-            'viewing_zenith': rad_quantity.viewing_zenith,
-            'viewing_azimuth': rad_quantity.viewing_azimuth
-        })
-        
+        dummy_dataset.attrs.update(
+            {
+                "radiative_quantity": rad_quantity.quantity.value,
+                "status": "TODO_PLACEHOLDER",
+                "description": f"Placeholder data for {rad_quantity.quantity.value} calculation",
+                "samples_per_pixel": rad_quantity.samples_per_pixel,
+                "viewing_zenith": rad_quantity.viewing_zenith,
+                "viewing_azimuth": rad_quantity.viewing_azimuth,
+            }
+        )
+
         # Save as Zarr
         dummy_dataset.to_zarr(dummy_output, mode="w")
-        
+
         return dummy_output
