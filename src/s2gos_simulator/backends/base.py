@@ -1,8 +1,9 @@
 from abc import ABC, abstractmethod
-from pathlib import Path
+from upath import UPath
 from typing import Any, Dict, List, Optional
 
 import xarray as xr
+from s2gos_utils.typing import PathLike
 
 
 class SimulationBackend(ABC):
@@ -35,7 +36,7 @@ class SimulationBackend(ABC):
 
     @abstractmethod
     def run_simulation(
-        self, scene_config, scene_dir: Path, output_dir: Optional[Path] = None, **kwargs
+        self, scene_config, scene_dir: PathLike, output_dir: Optional[PathLike] = None, **kwargs
     ) -> xr.Dataset:
         """Run complete simulation pipeline.
 
@@ -51,7 +52,7 @@ class SimulationBackend(ABC):
             scene_config: Scene configuration from s2gos_generator
             scene_dir: Directory containing scene assets (meshes, textures)
             output_dir: Directory for simulation outputs (optional)
-            **kwargs: Additional backend-specific parameters
+            **kwargs: Additional backend-specific args
 
         Returns:
             xarray.Dataset containing simulation results following S2GOS standards
@@ -79,7 +80,7 @@ class SimulationBackend(ABC):
 
         return errors
 
-    def validate_scene(self, scene_config, scene_dir: Path) -> List[str]:
+    def validate_scene(self, scene_config, scene_dir: PathLike) -> List[str]:
         """Validate scene configuration and assets.
 
         Optional method for backends to check scene validity before simulation.
@@ -140,7 +141,7 @@ class SimulationBackend(ABC):
         return measures
 
     def _create_output_metadata(
-        self, output_dir: Optional[Path] = None
+        self, output_dir: Optional[PathLike] = None
     ) -> Dict[str, Any]:
         """Create standardized output metadata.
 

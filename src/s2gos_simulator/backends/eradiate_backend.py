@@ -1,4 +1,4 @@
-from pathlib import Path
+from upath import UPath
 from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
@@ -88,7 +88,7 @@ class EradiateBackend(SimulationBackend):
 
         # Generate material IDs with "_mat_" prefix, ordered by texture index
         material_ids = []
-        for texture_index in sorted(material_indices.keys()):
+        for texture_index in sorted(material_indices.keys(), key=int):
             material_name = material_indices[texture_index]
             material_ids.append(f"_mat_{material_name}")
 
@@ -208,7 +208,7 @@ class EradiateBackend(SimulationBackend):
         return None
 
     def run_simulation(
-        self, scene_config, scene_dir: Path, output_dir: Optional[Path] = None, **kwargs
+        self, scene_config, scene_dir: UPath, output_dir: Optional[UPath] = None, **kwargs
     ) -> xr.Dataset:
         """Run Eradiate simulation with new configuration system."""
         if not self.is_available():
@@ -217,8 +217,9 @@ class EradiateBackend(SimulationBackend):
         if output_dir is None:
             output_dir = scene_dir / "eradiate_renders"
 
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
+        output_dir = UPath(output_dir)
+        from s2gos_utils.io.paths import mkdir
+        mkdir(output_dir)
 
         print(f"Running Eradiate simulation: {self.simulation_config.name}")
         print(f"Sensors: {len(self.simulation_config.sensors)}")
@@ -242,7 +243,7 @@ class EradiateBackend(SimulationBackend):
 
         return self._process_results(experiment, output_dir)
 
-    def _create_experiment(self, scene_config, scene_dir: Path):
+    def _create_experiment(self, scene_config, scene_dir: UPath):
         """Create Eradiate experiment from new configuration system."""
         kdict = {}
         kpmap = {}
@@ -701,7 +702,7 @@ class EradiateBackend(SimulationBackend):
 
         return srf_id
 
-    def _create_output_metadata(self, output_dir: Path) -> Dict[str, Any]:
+    def _create_output_metadata(self, output_dir: UPath) -> Dict[str, Any]:
         """Create standardized metadata for output files."""
         return {
             "simulation_name": self.simulation_config.name,
@@ -724,7 +725,7 @@ class EradiateBackend(SimulationBackend):
 
     # Legacy compatibility methods removed - using pure SceneDescription access
 
-    def _create_target_surface(self, scene_config, scene_dir: Path) -> Dict[str, Any]:
+    def _create_target_surface(self, scene_config, scene_dir: UPath) -> Dict[str, Any]:
         """Create target surface from SceneDescription."""
         target_config = scene_config.target
         target_mesh_path = scene_dir / target_config["mesh"]
@@ -762,7 +763,7 @@ class EradiateBackend(SimulationBackend):
             },
         }
 
-    def _create_buffer_surface(self, scene_config, scene_dir: Path) -> Dict[str, Any]:
+    def _create_buffer_surface(self, scene_config, scene_dir: UPath) -> Dict[str, Any]:
         """Create buffer surface from SceneDescription."""
         buffer_config = scene_config.buffer
         buffer_mesh_path = scene_dir / buffer_config["mesh"]
@@ -801,7 +802,8 @@ class EradiateBackend(SimulationBackend):
 
         buffer_bsdf_id = "buffer_material"
 
-        if mask_path and Path(mask_path).exists():
+        from s2gos_utils.io.paths import exists
+        if mask_path and exists(mask_path):
             with open_file(mask_path, "rb") as f:
                 mask_image = Image.open(f)
                 mask_image.load()
@@ -831,7 +833,7 @@ class EradiateBackend(SimulationBackend):
         return result
 
     def _create_background_surface(
-        self, scene_config, scene_dir: Path
+        self, scene_config, scene_dir: UPath
     ) -> Dict[str, Any]:
         """Create background surface from SceneDescription."""
         background_config = scene_config.background
@@ -884,7 +886,7 @@ class EradiateBackend(SimulationBackend):
 
         return result
 
-    def _create_rgb_visualization(self, experiment, output_dir: Path, id_to_plot: str):
+    def _create_rgb_visualization(self, experiment, output_dir: UPath, id_to_plot: str):
         """Create RGB visualization from camera results."""
         try:
             if id_to_plot not in experiment.results:
@@ -924,7 +926,7 @@ class EradiateBackend(SimulationBackend):
         except Exception as e:
             print(f"Warning: Could not create visualization for {id_to_plot}: {e}")
 
-    def _plot_spectral_data(self, radiance_data, output_path: Path):
+    def _plot_spectral_data(self, radiance_data, output_path: UPath):
         """Plot spectral data for point sensors."""
         try:
             import matplotlib.pyplot as plt
@@ -948,15 +950,16 @@ class EradiateBackend(SimulationBackend):
         except Exception as e:
             print(f"Warning: Could not create spectral plot: {e}")
 
-    def _process_results(self, experiment, output_dir: Path) -> xr.Dataset:
+    def _process_results(self, experiment, output_dir: UPath) -> xr.Dataset:
         """Process and save simulation results."""
         results = experiment.results
 
         if not results:
             raise ValueError("No results found in experiment")
 
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
+        output_dir = UPath(output_dir)
+        from s2gos_utils.io.paths import mkdir
+        mkdir(output_dir)
 
         metadata = self._create_output_metadata(output_dir)
 
@@ -992,8 +995,8 @@ class EradiateBackend(SimulationBackend):
         return results
 
     def _create_dummy_radiative_quantity_result(
-        self, rad_quantity, output_dir: Path, metadata: dict
-    ) -> Path:
+        self, rad_quantity, output_dir: UPath, metadata: dict
+    ) -> UPath:
         """Create dummy Zarr file for radiative quantity placeholder.
 
         TODO: This creates placeholder data. Future implementation will:

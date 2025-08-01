@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from pathlib import Path
+from upath import UPath
 from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 from s2gos_utils.io.paths import open_file, read_json
+from s2gos_utils.typing import PathLike
 
 
 class PlatformType(str, Enum):
@@ -662,7 +663,7 @@ class SimulationConfig(BaseModel):
     model_config = {
         "validate_assignment": True,
         "extra": "forbid",
-        "json_encoders": {datetime: lambda v: v.isoformat(), Path: lambda v: str(v)},
+        "json_encoders": {datetime: lambda v: v.isoformat()},
     }
 
     @field_validator("sensors")
@@ -690,7 +691,7 @@ class SimulationConfig(BaseModel):
         """Convert to dictionary for serialization."""
         return self.model_dump()
 
-    def to_json(self, path: Optional[Path] = None, indent: int = 2) -> str:
+    def to_json(self, path: Optional[PathLike] = None, indent: int = 2) -> str:
         """Export to JSON format."""
         json_str = self.model_dump_json(indent=indent)
         if path:
@@ -699,7 +700,7 @@ class SimulationConfig(BaseModel):
         return json_str
 
     @classmethod
-    def from_json(cls, path: Path) -> "SimulationConfig":
+    def from_json(cls, path: PathLike) -> "SimulationConfig":
         """Load from JSON file."""
         data = read_json(path)
         return cls(**data)
