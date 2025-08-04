@@ -9,7 +9,7 @@ class BackendRegistry:
     def __init__(self):
         self._backends: Dict[str, Type[SimulationBackend]] = {}
 
-    def register(self, name: str, backend_class: Type[SimulationBackend]):
+    def register(self, name: str, backend_class: Type[SimulationBackend]) -> None:
         """Register a backend class.
 
         Args:
@@ -93,7 +93,7 @@ class BackendRegistry:
 _registry = BackendRegistry()
 
 
-def register_backend(name: str, backend_class: Type[SimulationBackend]):
+def register_backend(name: str, backend_class: Type[SimulationBackend]) -> None:
     """Register a backend class globally.
 
     Args:

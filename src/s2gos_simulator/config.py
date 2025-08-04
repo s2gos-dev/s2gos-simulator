@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from upath import UPath
 from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, field_validator, model_validator
+from s2gos_utils import validate_config_version
 from s2gos_utils.io.paths import open_file, read_json
 from s2gos_utils.typing import PathLike
+
+from ._version import get_version
 
 
 class PlatformType(str, Enum):
@@ -631,6 +633,9 @@ class SimulationConfig(BaseModel):
     """
 
     # Metadata
+    config_version: str = Field(
+        default_factory=get_version, description="Configuration schema version"
+    )
     name: str = Field(..., description="Simulation name")
     description: Optional[str] = Field(None, description="Simulation description")
     created_at: datetime = Field(default_factory=datetime.now)
@@ -701,17 +706,25 @@ class SimulationConfig(BaseModel):
 
     @classmethod
     def from_json(cls, path: PathLike) -> "SimulationConfig":
-        """Load from JSON file."""
+        """Load from JSON file with version compatibility checking."""
         data = read_json(path)
-        return cls(**data)
 
-    def add_sensor(self, sensor: Union[SatelliteSensor, UAVSensor, GroundSensor]):
+        # Validate configuration version
+        validated_data = validate_config_version(
+            "simulation_config", data, get_version(), "simulation configuration"
+        )
+
+        return cls(**validated_data)
+
+    def add_sensor(
+        self, sensor: Union[SatelliteSensor, UAVSensor, GroundSensor]
+    ) -> None:
         """Add a sensor to the configuration."""
         if sensor.id in [s.id for s in self.sensors]:
             raise ValueError(f"Sensor ID '{sensor.id}' already exists")
         self.sensors.append(sensor)
 
-    def remove_sensor(self, sensor_id: str):
+    def remove_sensor(self, sensor_id: str) -> None:
         """Remove a sensor by ID."""
         self.sensors = [s for s in self.sensors if s.id != sensor_id]
 

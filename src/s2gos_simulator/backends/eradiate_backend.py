@@ -1,10 +1,11 @@
-from upath import UPath
 from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
 import xarray as xr
 from PIL import Image
 from s2gos_utils.io.paths import open_file
+from s2gos_utils.scene import SceneDescription
+from upath import UPath
 
 from .base import SimulationBackend
 from .eradiate_materials import EradiateMaterialAdapter
@@ -72,19 +73,21 @@ class EradiateBackend(SimulationBackend):
         """Check if Eradiate dependencies are available."""
         return ERADIATE_AVAILABLE
 
-    def _get_material_ids_from_scene(self, scene_config) -> List[str]:
+    def _get_material_ids_from_scene(
+        self, scene_description: SceneDescription
+    ) -> List[str]:
         """Get material IDs from SceneDescription metadata.
 
         Args:
-            scene_config: SceneDescription object
+            scene_description: SceneDescription object
 
         Returns:
             List of material IDs with "_mat_" prefix in texture index order
         """
-        if not scene_config.material_indices:
+        if not scene_description.material_indices:
             raise ValueError("SceneDescription must contain 'material_indices'")
 
-        material_indices = scene_config.material_indices
+        material_indices = scene_description.material_indices
 
         # Generate material IDs with "_mat_" prefix, ordered by texture index
         material_ids = []
@@ -208,9 +211,13 @@ class EradiateBackend(SimulationBackend):
         return None
 
     def run_simulation(
-        self, scene_config, scene_dir: UPath, output_dir: Optional[UPath] = None, **kwargs
+        self,
+        scene_description: SceneDescription,
+        scene_dir: UPath,
+        output_dir: Optional[UPath] = None,
+        **kwargs,
     ) -> xr.Dataset:
-        """Run Eradiate simulation with new configuration system."""
+        """Run Eradiate simulation from scene description."""
         if not self.is_available():
             raise RuntimeError("Eradiate is not available")
 
@@ -219,6 +226,7 @@ class EradiateBackend(SimulationBackend):
 
         output_dir = UPath(output_dir)
         from s2gos_utils.io.paths import mkdir
+
         mkdir(output_dir)
 
         print(f"Running Eradiate simulation: {self.simulation_config.name}")
@@ -230,7 +238,7 @@ class EradiateBackend(SimulationBackend):
             f"Measurement types: {[mt.value for mt in self.simulation_config.output_quantities]}"
         )
 
-        experiment = self._create_experiment(scene_config, scene_dir)
+        experiment = self._create_experiment(scene_description, scene_dir)
 
         print("Executing Eradiate simulation...")
         eradiate.run(experiment)
@@ -243,13 +251,13 @@ class EradiateBackend(SimulationBackend):
 
         return self._process_results(experiment, output_dir)
 
-    def _create_experiment(self, scene_config, scene_dir: UPath):
-        """Create Eradiate experiment from new configuration system."""
+    def _create_experiment(self, scene_description: SceneDescription, scene_dir: UPath):
+        """Create Eradiate experiment from scene description."""
         kdict = {}
         kpmap = {}
         adapter = EradiateMaterialAdapter()
 
-        for mat_name, material in scene_config.materials.items():
+        for mat_name, material in scene_description.materials.items():
             # Use adapter pattern to create Eradiate-specific dictionaries
             from s2gos_utils.scene.materials import (
                 BilambertianMaterial,
@@ -278,26 +286,26 @@ class EradiateBackend(SimulationBackend):
             kdict.update(mat_kdict)
             kpmap.update(mat_kpmap)
 
-        # Get surface configurations from SceneDescription proper fields
-        buffer = scene_config.buffer
-        background = scene_config.background
+        # Get surface configurations from SceneDescription fields
+        buffer = scene_description.buffer
+        background = scene_description.background
 
-        # Create surfaces using SceneDescription
-        kdict.update(self._create_target_surface(scene_config, scene_dir))
+        # Create surfaces from scene description
+        kdict.update(self._create_target_surface(scene_description, scene_dir))
 
         if buffer:
-            kdict.update(self._create_buffer_surface(scene_config, scene_dir))
+            kdict.update(self._create_buffer_surface(scene_description, scene_dir))
 
         if background:
-            kdict.update(self._create_background_surface(scene_config, scene_dir))
+            kdict.update(self._create_background_surface(scene_description, scene_dir))
 
-        atmosphere = self._create_atmosphere_from_config(scene_config)
+        atmosphere = self._create_atmosphere_from_config(scene_description)
 
         illumination = self._translate_illumination()
 
         measures = self._translate_sensors()
 
-        geometry = self._create_geometry_from_atmosphere(scene_config)
+        geometry = self._create_geometry_from_atmosphere(scene_description)
 
         return AtmosphereExperiment(
             geometry=geometry,
@@ -309,9 +317,9 @@ class EradiateBackend(SimulationBackend):
             kpmap=kpmap,
         )
 
-    def _create_geometry_from_atmosphere(self, scene_config):
+    def _create_geometry_from_atmosphere(self, scene_description: SceneDescription):
         """Create geometry with bounds matching the atmosphere configuration."""
-        atmosphere = scene_config.atmosphere
+        atmosphere = scene_description.atmosphere
         toa = (
             atmosphere["toa"] if "toa" in atmosphere else 40000.0
         )  # Top of atmosphere (meters)
@@ -323,9 +331,9 @@ class EradiateBackend(SimulationBackend):
 
         return geometry
 
-    def _create_atmosphere_from_config(self, scene_config):
+    def _create_atmosphere_from_config(self, scene_description: SceneDescription):
         """Create atmosphere based on scene description format."""
-        atmosphere = scene_config.atmosphere
+        atmosphere = scene_description.atmosphere
         atmosphere_type = atmosphere["type"] if "type" in atmosphere else None
 
         if not atmosphere_type:
@@ -723,11 +731,13 @@ class EradiateBackend(SimulationBackend):
             "illumination_type": self.simulation_config.illumination.type,
         }
 
-    # Legacy compatibility methods removed - using pure SceneDescription access
+    # Surface creation methods - work directly with SceneDescription data
 
-    def _create_target_surface(self, scene_config, scene_dir: UPath) -> Dict[str, Any]:
+    def _create_target_surface(
+        self, scene_description: SceneDescription, scene_dir: UPath
+    ) -> Dict[str, Any]:
         """Create target surface from SceneDescription."""
-        target_config = scene_config.target
+        target_config = scene_description.target
         target_mesh_path = scene_dir / target_config["mesh"]
         target_texture_path = scene_dir / target_config["selection_texture"]
 
@@ -737,7 +747,7 @@ class EradiateBackend(SimulationBackend):
         selection_texture_data = np.array(texture_image)
         selection_texture_data = np.atleast_3d(selection_texture_data)
 
-        material_ids = self._get_material_ids_from_scene(scene_config)
+        material_ids = self._get_material_ids_from_scene(scene_description)
 
         return {
             "terrain_material": {
@@ -763,9 +773,11 @@ class EradiateBackend(SimulationBackend):
             },
         }
 
-    def _create_buffer_surface(self, scene_config, scene_dir: UPath) -> Dict[str, Any]:
+    def _create_buffer_surface(
+        self, scene_description: SceneDescription, scene_dir: UPath
+    ) -> Dict[str, Any]:
         """Create buffer surface from SceneDescription."""
-        buffer_config = scene_config.buffer
+        buffer_config = scene_description.buffer
         buffer_mesh_path = scene_dir / buffer_config["mesh"]
         buffer_texture_path = scene_dir / buffer_config["selection_texture"]
         mask_path = (
@@ -780,7 +792,7 @@ class EradiateBackend(SimulationBackend):
         buffer_selection_texture_data = np.array(buffer_texture_image)
         buffer_selection_texture_data = np.atleast_3d(buffer_selection_texture_data)
 
-        material_ids = self._get_material_ids_from_scene(scene_config)
+        material_ids = self._get_material_ids_from_scene(scene_description)
 
         result = {
             "buffer_material": {
@@ -803,6 +815,7 @@ class EradiateBackend(SimulationBackend):
         buffer_bsdf_id = "buffer_material"
 
         from s2gos_utils.io.paths import exists
+
         if mask_path and exists(mask_path):
             with open_file(mask_path, "rb") as f:
                 mask_image = Image.open(f)
@@ -833,10 +846,10 @@ class EradiateBackend(SimulationBackend):
         return result
 
     def _create_background_surface(
-        self, scene_config, scene_dir: UPath
+        self, scene_description: SceneDescription, scene_dir: UPath
     ) -> Dict[str, Any]:
         """Create background surface from SceneDescription."""
-        background_config = scene_config.background
+        background_config = scene_description.background
         elevation = background_config["elevation"]
         background_selection_texture_path = (
             scene_dir / background_config["selection_texture"]
@@ -851,7 +864,7 @@ class EradiateBackend(SimulationBackend):
             background_selection_texture_data
         )
 
-        material_ids = self._get_material_ids_from_scene(scene_config)
+        material_ids = self._get_material_ids_from_scene(scene_description)
 
         result = {
             "background_material": {
@@ -959,6 +972,7 @@ class EradiateBackend(SimulationBackend):
 
         output_dir = UPath(output_dir)
         from s2gos_utils.io.paths import mkdir
+
         mkdir(output_dir)
 
         metadata = self._create_output_metadata(output_dir)

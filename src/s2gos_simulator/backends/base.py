@@ -1,8 +1,8 @@
 from abc import ABC, abstractmethod
-from upath import UPath
 from typing import Any, Dict, List, Optional
 
 import xarray as xr
+from s2gos_utils.scene import SceneDescription
 from s2gos_utils.typing import PathLike
 
 
@@ -36,20 +36,24 @@ class SimulationBackend(ABC):
 
     @abstractmethod
     def run_simulation(
-        self, scene_config, scene_dir: PathLike, output_dir: Optional[PathLike] = None, **kwargs
+        self,
+        scene_description: SceneDescription,
+        scene_dir: PathLike,
+        output_dir: Optional[PathLike] = None,
+        **kwargs,
     ) -> xr.Dataset:
         """Run complete simulation pipeline.
 
         This is the main entry point for running simulations. Implementations
         should handle all aspects of the simulation internally:
-        - Translation of generic config to backend-specific format
+        - Translation of scene description to backend-specific format
         - Scene setup and surface creation
         - Backend-specific configuration
         - Simulation execution
         - Result processing and standardization
 
         Args:
-            scene_config: Scene configuration from s2gos_generator
+            scene_description: Scene description from s2gos_generator
             scene_dir: Directory containing scene assets (meshes, textures)
             output_dir: Directory for simulation outputs (optional)
             **kwargs: Additional backend-specific args
@@ -80,14 +84,16 @@ class SimulationBackend(ABC):
 
         return errors
 
-    def validate_scene(self, scene_config, scene_dir: PathLike) -> List[str]:
-        """Validate scene configuration and assets.
+    def validate_scene(
+        self, scene_description: SceneDescription, scene_dir: PathLike
+    ) -> List[str]:
+        """Validate scene description and assets.
 
         Optional method for backends to check scene validity before simulation.
         Default implementation returns no errors.
 
         Args:
-            scene_config: Scene configuration to validate
+            scene_description: Scene description to validate
             scene_dir: Directory containing scene assets
 
         Returns:

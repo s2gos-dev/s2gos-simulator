@@ -1,10 +1,10 @@
 """Eradiate-specific material functionality for S2GOS simulator backend."""
 
 import logging
-from upath import UPath
-from typing import Callable, Dict
+from typing import Any, Callable, Dict
 
 import xarray as xr
+from upath import UPath
 
 try:
     import mitsuba as mi
@@ -57,6 +57,7 @@ def _create_spectral_callable(
     try:
         # Check if file exists before trying to load
         from s2gos_utils.io.paths import exists
+
         if not exists(full_path):
             raise FileNotFoundError(f"Spectral data file not found: {full_path}")
 
@@ -120,7 +121,7 @@ class EradiateMaterialAdapter:
     """Adapter for converting S2GOS materials to Eradiate kernel dictionaries."""
 
     @staticmethod
-    def load_spectral_data(file_path: UPath, variable: str = "reflectance"):
+    def load_spectral_data(file_path: UPath, variable: str = "reflectance") -> Any:
         """Load spectral data from file using Eradiate's InterpolatedSpectrum."""
         if not ERADIATE_AVAILABLE:
             raise ImportError("Eradiate is not available")
