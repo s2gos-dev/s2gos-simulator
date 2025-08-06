@@ -1,10 +1,14 @@
 """Eradiate-specific material functionality for S2GOS simulator backend."""
 
 import logging
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, Union
 
+import numpy as np
 import xarray as xr
 from upath import UPath
+
+from eradiate import KernelContext
+from eradiate.kernel import UpdateParameter
 
 try:
     import mitsuba as mi
@@ -24,7 +28,7 @@ except ImportError:
 
 def _create_spectral_callable(
     spectral_dict: Dict[str, str],
-) -> Callable[[KernelContext], float]:
+) -> Callable[["KernelContext"], float]:
     """Create callable function from spectral parameter dictionary.
 
     Args:
@@ -35,7 +39,7 @@ def _create_spectral_callable(
     """
     if not ERADIATE_AVAILABLE:
         # Fallback when Eradiate is not available
-        def dummy_func(ctx) -> float:
+        def dummy_func(_ctx) -> float:
             return 0.5
 
         return dummy_func
@@ -71,7 +75,7 @@ def _create_spectral_callable(
         da = dataset[variable]
         spectrum = InterpolatedSpectrum.from_dataarray(dataarray=da)
 
-        def spectral_func(ctx: KernelContext) -> float:
+        def spectral_func(ctx: "KernelContext") -> float:
             return spectrum.eval(ctx.si).m_as("dimensionless")
 
         logging.info(
@@ -86,15 +90,15 @@ def _create_spectral_callable(
         )
         logging.warning("Using fallback constant value 0.5 for spectral parameter")
 
-        def fallback_func(ctx) -> float:
+        def fallback_func(_ctx) -> float:
             return 0.5
 
         return fallback_func
 
 
 def _declare_mono_scene_parameter(
-    func: Callable[[KernelContext], float], node_id: str, param: str
-) -> UpdateParameter:
+    func: Callable[["KernelContext"], float], node_id: str, param: str
+) -> "UpdateParameter":
     """Create UpdateParameter for monochromatic mode.
 
     Args:
@@ -250,9 +254,82 @@ class EradiateMaterialAdapter:
         return {material.mat_id: kdict}
 
     @staticmethod
-    def create_ocean_kpmap(material) -> dict:
+    def create_ocean_kpmap(_material) -> dict:
         """Generate Eradiate parameter map for ocean material."""
         if not ERADIATE_AVAILABLE:
             raise ImportError("Eradiate is not available")
 
         return {}  # Ocean materials typically don't have spectral parameters
+
+    @staticmethod
+    def create_hamster_kdict(
+        material_id: str, 
+        albedo_data: xr.DataArray
+    ) -> dict:
+        """Generate Eradiate kernel dictionary for HAMSTER albedo material.
+        
+        Args:
+            material_id: Material identifier (e.g., "_mat_baresoil_hamster")
+            albedo_data: HAMSTER albedo DataArray with (lat, lon, wavelength) dimensions
+            
+        Returns:
+            Dictionary with texture and material definitions for HAMSTER albedo
+        """
+        texture_data = np.ones_like(albedo_data.values[:, :, :3])
+        texture_id = f"texture_{material_id}"
+        
+        result = {
+            texture_id: {
+                "type": "bitmap",
+                "id": texture_id,
+                "filter_type": "nearest", 
+                "wrap_mode": "clamp",
+                "data": texture_data,
+                "raw": True,
+            },
+            material_id: {
+                "type": "diffuse",
+                "id": material_id,
+                "reflectance": {"type": "ref", "id": texture_id},
+            }
+        }
+        
+        return result
+
+    @staticmethod
+    def create_hamster_kpmap(
+        material_id: str,
+        albedo_data: xr.DataArray
+    ) -> dict:
+        """Generate Eradiate parameter map for HAMSTER albedo material.
+        
+        Args:
+            material_id: Material identifier 
+            albedo_data: HAMSTER albedo DataArray with spectral interpolation support
+            
+        Returns:
+            Dictionary with scene parameters for spectral interpolation
+        """
+        if not ERADIATE_AVAILABLE:
+            raise ImportError("Eradiate is not available")
+
+        def hamster_spectral_func(ctx: "KernelContext") -> np.ndarray:
+            """Interpolate HAMSTER albedo data for given wavelength."""
+            interpolated = albedo_data.sel(wavelength=ctx.si.w, method="nearest")
+            return interpolated.values[..., np.newaxis]
+
+        param_key = f"{material_id}.reflectance.data"
+        
+        result = {
+            param_key: UpdateParameter(
+                hamster_spectral_func,
+                lookup_strategy=TypeIdLookupStrategy(
+                    node_type=mi.BSDF,
+                    node_id=material_id,
+                    parameter_relpath="reflectance.data"
+                ),
+                flags=UpdateParameter.Flags.SPECTRAL,
+            )
+        }
+        
+        return result

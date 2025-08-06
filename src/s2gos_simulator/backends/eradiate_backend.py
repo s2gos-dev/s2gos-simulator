@@ -257,6 +257,7 @@ class EradiateBackend(SimulationBackend):
         kpmap = {}
         adapter = EradiateMaterialAdapter()
 
+        hamster_data_dict = self._get_hamster_data_for_scene(scene_description, scene_dir)
         for mat_name, material in scene_description.materials.items():
             # Use adapter pattern to create Eradiate-specific dictionaries
             from s2gos_utils.scene.materials import (
@@ -279,25 +280,45 @@ class EradiateBackend(SimulationBackend):
                 mat_kdict = adapter.create_ocean_kdict(material)
                 mat_kpmap = adapter.create_ocean_kpmap(material)
             else:
-                # Fallback - assume diffuse
                 mat_kdict = adapter.create_diffuse_kdict(material)
                 mat_kpmap = adapter.create_diffuse_kpmap(material)
 
             kdict.update(mat_kdict)
             kpmap.update(mat_kpmap)
+        
+        # Create surface-specific HAMSTER baresoil materials when available
+        if hamster_data_dict is not None:
+            baresoil_material = scene_description.materials.get("baresoil")
+            if baresoil_material:
+                for surface_name, hamster_data in hamster_data_dict.items():
+                    hamster_material_id = f"_mat_baresoil_{surface_name}"
+                    
+                    hamster_kdict = adapter.create_hamster_kdict(
+                        material_id=hamster_material_id,
+                        albedo_data=hamster_data
+                    )
+
+                    hamster_kpmap = adapter.create_hamster_kpmap(
+                        material_id=hamster_material_id,
+                        albedo_data=hamster_data
+                    )
+                    
+                    kdict.update(hamster_kdict)  
+                    kpmap.update(hamster_kpmap)
 
         # Get surface configurations from SceneDescription fields
         buffer = scene_description.buffer
         background = scene_description.background
 
         # Create surfaces from scene description
-        kdict.update(self._create_target_surface(scene_description, scene_dir))
+        hamster_available = hamster_data_dict is not None
+        kdict.update(self._create_target_surface(scene_description, scene_dir, hamster_available))
 
         if buffer:
-            kdict.update(self._create_buffer_surface(scene_description, scene_dir))
+            kdict.update(self._create_buffer_surface(scene_description, scene_dir, hamster_available))
 
         if background:
-            kdict.update(self._create_background_surface(scene_description, scene_dir))
+            kdict.update(self._create_background_surface(scene_description, scene_dir, hamster_available))
 
         atmosphere = self._create_atmosphere_from_config(scene_description)
 
@@ -731,10 +752,9 @@ class EradiateBackend(SimulationBackend):
             "illumination_type": self.simulation_config.illumination.type,
         }
 
-    # Surface creation methods - work directly with SceneDescription data
 
     def _create_target_surface(
-        self, scene_description: SceneDescription, scene_dir: UPath
+        self, scene_description: SceneDescription, scene_dir: UPath, hamster_available: bool = False
     ) -> Dict[str, Any]:
         """Create target surface from SceneDescription."""
         target_config = scene_description.target
@@ -748,6 +768,12 @@ class EradiateBackend(SimulationBackend):
         selection_texture_data = np.atleast_3d(selection_texture_data)
 
         material_ids = self._get_material_ids_from_scene(scene_description)
+        
+        if hamster_available:
+            material_ids = [
+                "_mat_baresoil_target" if mat_id == "_mat_baresoil" else mat_id
+                for mat_id in material_ids
+            ]
 
         return {
             "terrain_material": {
@@ -774,7 +800,7 @@ class EradiateBackend(SimulationBackend):
         }
 
     def _create_buffer_surface(
-        self, scene_description: SceneDescription, scene_dir: UPath
+        self, scene_description: SceneDescription, scene_dir: UPath, hamster_available: bool = False
     ) -> Dict[str, Any]:
         """Create buffer surface from SceneDescription."""
         buffer_config = scene_description.buffer
@@ -793,6 +819,12 @@ class EradiateBackend(SimulationBackend):
         buffer_selection_texture_data = np.atleast_3d(buffer_selection_texture_data)
 
         material_ids = self._get_material_ids_from_scene(scene_description)
+        
+        if hamster_available:
+            material_ids = [
+                "_mat_baresoil_buffer" if mat_id == "_mat_baresoil" else mat_id
+                for mat_id in material_ids
+            ]
 
         result = {
             "buffer_material": {
@@ -846,7 +878,7 @@ class EradiateBackend(SimulationBackend):
         return result
 
     def _create_background_surface(
-        self, scene_description: SceneDescription, scene_dir: UPath
+        self, scene_description: SceneDescription, scene_dir: UPath, hamster_available: bool = False
     ) -> Dict[str, Any]:
         """Create background surface from SceneDescription."""
         background_config = scene_description.background
@@ -865,6 +897,12 @@ class EradiateBackend(SimulationBackend):
         )
 
         material_ids = self._get_material_ids_from_scene(scene_description)
+        
+        if hamster_available:
+            material_ids = [
+                "_mat_baresoil_background" if mat_id == "_mat_baresoil" else mat_id
+                for mat_id in material_ids
+            ]
 
         result = {
             "background_material": {
@@ -1007,6 +1045,76 @@ class EradiateBackend(SimulationBackend):
             )
 
         return results
+
+    def _get_hamster_data_for_scene(
+        self, scene_description: SceneDescription, scene_dir: UPath
+    ) -> Optional[dict]:
+        """Load HAMSTER albedo data from zarr files referenced in scene description areas.
+        
+        Args:
+            scene_description: Scene description with HAMSTER data file paths in area sections
+            scene_dir: Directory containing the scene description file (for resolving relative paths)
+            
+        Returns:
+            Dict with loaded HAMSTER albedo DataArrays for each surface area, or None
+            Format: {'target': target_subset, 'buffer': buffer_subset, 'background': bg_subset}
+        """
+        try:
+            hamster_data_files = {}
+            
+            if scene_description.target and 'hamster_data' in scene_description.target:
+                hamster_data_files['target'] = scene_description.target['hamster_data']
+                
+            if scene_description.buffer and 'hamster_data' in scene_description.buffer:
+                hamster_data_files['buffer'] = scene_description.buffer['hamster_data']
+                
+            if scene_description.background and 'hamster_data' in scene_description.background:
+                hamster_data_files['background'] = scene_description.background['hamster_data']
+                
+            if not hamster_data_files:
+                import logging
+                logging.info("No HAMSTER data files found in scene description areas")
+                return None
+            
+            hamster_data = {}
+            base_path = scene_dir
+            
+            import logging
+            import xarray as xr
+            from s2gos_utils.io.paths import exists
+            
+            for area, relative_path in hamster_data_files.items():
+                file_path = base_path / relative_path
+                if not exists(file_path):
+                    logging.warning(f"HAMSTER data file not found: {file_path}, skipping {area} area")
+                    continue
+                    
+                try:
+                    dataset = xr.open_zarr(file_path)
+                    data_vars = list(dataset.data_vars.keys())
+                    if not data_vars:
+                        logging.warning(f"No data variables found in HAMSTER file: {file_path}")
+                        continue
+                        
+                    albedo_data = dataset[data_vars[0]]
+                    hamster_data[area] = albedo_data
+                    logging.info(f"Loaded HAMSTER data for {area} area from {file_path}: {albedo_data.sizes}")
+                    
+                except Exception as e:
+                    logging.warning(f"Failed to load HAMSTER data from {file_path}: {e}")
+                    continue
+            
+            if hamster_data:
+                logging.info(f"Successfully loaded HAMSTER data for {len(hamster_data)} surface areas")
+                return hamster_data
+            else:
+                logging.warning("No HAMSTER data could be loaded from any files")
+                return None
+            
+        except Exception as e:
+            import logging
+            logging.warning(f"Could not load HAMSTER data: {e}, falling back to standard baresoil")
+            return None
 
     def _create_dummy_radiative_quantity_result(
         self, rad_quantity, output_dir: UPath, metadata: dict
