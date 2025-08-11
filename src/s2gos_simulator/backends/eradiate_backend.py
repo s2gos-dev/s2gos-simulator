@@ -251,11 +251,50 @@ class EradiateBackend(SimulationBackend):
 
         return self._process_results(experiment, output_dir)
 
+    def _process_object_materials(self, scene_description: SceneDescription) -> None:
+        """Process object materials that are dict definitions and add them to scene materials.
+        
+        This method extracts material definitions from objects and adds them to the 
+        scene materials for unified processing, avoiding duplication.
+        
+        Args:
+            scene_description: Scene description with objects that may contain material dicts
+        """
+        from s2gos_utils.scene.materials import Material
+        
+        if not scene_description.objects:
+            return
+            
+        for obj in scene_description.objects:
+            if "material" not in obj:
+                continue
+                
+            material = obj["material"]
+            if isinstance(material, dict):
+                # Generate consistent material name
+                import sys
+                import os
+                sys.path.append('/home/gonzalezm/s2gos/s2gos/experimenting')
+                from mitsuba_xml_parser import generate_material_name
+                material_name = generate_material_name(material)
+                
+                # Add to scene materials if not already present (deduplication)
+                if material_name not in scene_description.materials:
+                    # Convert dict to Material object using existing pattern
+                    material_obj = Material.from_dict(material, id=material_name)
+                    scene_description.materials[material_name] = material_obj
+                
+                # Update object to use material reference instead of dict
+                obj["material"] = material_name
+
     def _create_experiment(self, scene_description: SceneDescription, scene_dir: UPath):
         """Create Eradiate experiment from scene description."""
         kdict = {}
         kpmap = {}
         adapter = EradiateMaterialAdapter()
+
+        # Process object materials that are dict definitions and add them to scene materials
+        self._process_object_materials(scene_description)
 
         hamster_data_dict = self._get_hamster_data_for_scene(scene_description, scene_dir)
         for mat_name, material in scene_description.materials.items():
@@ -319,6 +358,50 @@ class EradiateBackend(SimulationBackend):
 
         if background:
             kdict.update(self._create_background_surface(scene_description, scene_dir, hamster_available))
+
+        # Process 3D objects from scene description
+        if scene_description.objects:
+            for obj in scene_description.objects:
+                object_mesh_path = scene_dir / obj["mesh"]
+                obj_dict = {
+                    "type": "ply",
+                    "filename": str(object_mesh_path),
+                    "id": obj["id"]
+                }
+                
+                # Add material assignment
+                if "material" in obj:
+                    material = obj["material"]
+                    # At this point, all materials should be string references due to preprocessing
+                    if isinstance(material, str):
+                        # String reference - use as material ID with _mat_ prefix (following existing pattern)
+                        obj_dict["bsdf"] = {"type": "ref", "id": f"_mat_{material}"}
+                    else:
+                        # Fallback for any remaining edge cases
+                        obj_dict["bsdf"] = {"type": "diffuse", "reflectance": {"type": "uniform", "value": 0.5}}
+                
+                # Add transformation (position + rotation + scale)
+                if "position" in obj and "scale" in obj:
+                    x, y, z = obj["position"] 
+                    scale = obj["scale"]
+                    
+                    # Build transform: translate @ rotate @ scale
+                    to_world = mi.ScalarTransform4f.translate([x, y, z])
+                    
+                    # Apply rotations if present (in degrees)
+                    if "rotation" in obj:
+                        rx, ry, rz = obj["rotation"]
+                        if rx != 0:
+                            to_world = to_world @ mi.ScalarTransform4f.rotate([1, 0, 0], rx)
+                        if ry != 0:
+                            to_world = to_world @ mi.ScalarTransform4f.rotate([0, 1, 0], ry)
+                        if rz != 0:
+                            to_world = to_world @ mi.ScalarTransform4f.rotate([0, 0, 1], rz)
+                    
+                    to_world = to_world @ mi.ScalarTransform4f.scale(scale)
+                    obj_dict["to_world"] = to_world
+                
+                kdict[obj["id"]] = obj_dict
 
         atmosphere = self._create_atmosphere_from_config(scene_description)
 

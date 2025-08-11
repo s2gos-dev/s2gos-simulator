@@ -27,12 +27,16 @@ except ImportError:
 
 
 def _create_spectral_callable(
-    spectral_dict: Dict[str, str],
+    spectral_dict: Dict[str, Any],
 ) -> Callable[["KernelContext"], float]:
     """Create callable function from spectral parameter dictionary.
 
+    Supports both spectral file references and uniform values:
+    - File reference: {"path": "spectrum.nc", "variable": "reflectance"}
+    - Uniform value: {"type": "uniform", "value": 0.5}
+
     Args:
-        spectral_dict: Dictionary with 'path' and 'variable' keys
+        spectral_dict: Dictionary with spectral data specification
 
     Returns:
         Callable that evaluates spectral data for given KernelContext
@@ -44,6 +48,44 @@ def _create_spectral_callable(
 
         return dummy_func
 
+    if spectral_dict.get("type") == "uniform":
+        uniform_value = spectral_dict["value"]
+        
+        if isinstance(uniform_value, (int, float)):
+            def uniform_scalar_func(_ctx) -> float:
+                return float(uniform_value)
+                
+            logging.info(f"Using uniform scalar value: {uniform_value}")
+            return uniform_scalar_func
+            
+        elif isinstance(uniform_value, (list, tuple)) and len(uniform_value) == 3:
+            r, g, b = uniform_value
+            
+            def uniform_rgb_func(ctx: "KernelContext") -> float:
+                wavelength = ctx.si.wavelength.m_as("nanometer") if hasattr(ctx.si, 'wavelength') else 550.0
+                
+                if wavelength <= 440:
+                    return float(b)
+                elif wavelength <= 540:  # Green-ish  
+                    return float(g)
+                else:
+                    return float(r)
+                    
+            logging.info(f"Using uniform RGB value: {uniform_value}")
+            return uniform_rgb_func
+            
+        else:
+            logging.warning(f"Invalid uniform value format: {uniform_value}, using fallback")
+            def fallback_uniform_func(_ctx) -> float:
+                return 0.5
+            return fallback_uniform_func
+    
+    if "path" not in spectral_dict or "variable" not in spectral_dict:
+        logging.error(f"Invalid spectral dictionary format: {spectral_dict}")
+        def fallback_func(_ctx) -> float:
+            return 0.5
+        return fallback_func
+        
     file_path = spectral_dict["path"]
     variable = spectral_dict["variable"]
 
