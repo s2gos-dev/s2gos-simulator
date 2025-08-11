@@ -4,6 +4,9 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional, Union
 
+import astropy.units as u
+from astropy.coordinates import AltAz, EarthLocation, get_sun
+from astropy.time import Time
 from pydantic import BaseModel, Field, field_validator, model_validator
 from s2gos_utils import validate_config_version
 from s2gos_utils.io.paths import open_file, read_json
@@ -211,6 +214,47 @@ class DirectionalIllumination(Illumination):
     irradiance_dataset: str = Field(
         "thuillier_2003", description="Solar irradiance dataset"
     )
+
+    @classmethod
+    def from_date_and_location(
+        cls,
+        time: datetime,
+        latitude: float,
+        longitude: float,
+        irradiance_dataset: str = "thuillier_2003",
+    ) -> "DirectionalIllumination":
+        """
+        Creates a DirectionalIllumination instance by calculating solar angles
+        for a given time and location, and converting them to Eradiate conventions.
+
+        Args:
+            time: The date and time of the observation.
+            latitude: Observer's latitude in degrees.
+            longitude: Observer's longitude in degrees.
+            irradiance_dataset: Name of the solar irradiance dataset to use.
+
+        Returns:
+            A new DirectionalIllumination instance with corrected zenith and azimuth.
+
+        Raises:
+            ValueError: If the sun is below the horizon at the specified time.
+        """
+        location = EarthLocation(lat=latitude * u.deg, lon=longitude * u.deg)
+        obs_time = Time(time)
+
+        altaz_frame = AltAz(obstime=obs_time, location=location)
+        sun_altaz = get_sun(obs_time).transform_to(altaz_frame)
+
+        zenith_angle = 90 * u.deg - sun_altaz.alt
+
+        astropy_az = sun_altaz.az
+        eradiate_az = (90 * u.deg - astropy_az) % (360 * u.deg)
+
+        return cls(
+            zenith=zenith_angle.deg,
+            azimuth=eradiate_az.deg,
+            irradiate_dataset=irradiance_dataset,
+        )
 
 
 class ConstantIllumination(Illumination):
