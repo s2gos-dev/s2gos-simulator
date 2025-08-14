@@ -75,16 +75,10 @@ def _create_spectral_callable(
             return uniform_rgb_func
             
         else:
-            logging.warning(f"Invalid uniform value format: {uniform_value}, using fallback")
-            def fallback_uniform_func(_ctx) -> float:
-                return 0.5
-            return fallback_uniform_func
+            raise ValueError(f"Invalid uniform value format: {uniform_value}. Expected float, RGB array, or single value.")
     
     if "path" not in spectral_dict or "variable" not in spectral_dict:
-        logging.error(f"Invalid spectral dictionary format: {spectral_dict}")
-        def fallback_func(_ctx) -> float:
-            return 0.5
-        return fallback_func
+        raise ValueError(f"Invalid spectral dictionary format: {spectral_dict}. Must contain 'path' and 'variable' fields.")
         
     file_path = spectral_dict["path"]
     variable = spectral_dict["variable"]
@@ -125,17 +119,26 @@ def _create_spectral_callable(
         )
         return spectral_func
 
+    except FileNotFoundError as e:
+        raise FileNotFoundError(f"Spectral data file not found: {full_path}") from e
+    except KeyError as e:
+        raise ValueError(f"Variable '{variable}' not found in spectral dataset {full_path}. {e}") from e
     except Exception as e:
-        # Log the error and fallback
-        logging.error(
-            f"Failed to load spectral data from {full_path} (variable: {variable}): {e}"
-        )
-        logging.warning("Using fallback constant value 0.5 for spectral parameter")
+        raise ValueError(f"Failed to load spectral data from {full_path} (variable: {variable}): {e}") from e
 
-        def fallback_func(_ctx) -> float:
-            return 0.5
 
-        return fallback_func
+def _create_scalar_callable(value: Union[int, float]) -> Callable[["KernelContext"], float]:
+    """Create callable function from scalar value for Eradiate context.
+    
+    Args:
+        value: Scalar value (int or float)
+        
+    Returns:
+        Callable that returns the scalar value for any KernelContext
+    """
+    def scalar_func(_ctx: "KernelContext") -> float:
+        return float(value)
+    return scalar_func
 
 
 def _declare_mono_scene_parameter(
@@ -187,7 +190,7 @@ class EradiateMaterialAdapter:
         result = {
             material.mat_id: {
                 "type": "diffuse",
-                "id": material.mat_id,
+                "id": f"_mat_{material.mat_id}",
                 "reflectance": 0.0,
             }
         }
@@ -202,11 +205,11 @@ class EradiateMaterialAdapter:
 
         result = {}
 
-        node_id = material.mat_id
+        node_id = f"_mat_{material.mat_id}"
         param = "reflectance.value"
         # Convert dict to callable function
         reflectance_func = _create_spectral_callable(material.reflectance)
-        result[f"{node_id}.{param}"] = _declare_mono_scene_parameter(
+        result[f"{material.mat_id}.{param}"] = _declare_mono_scene_parameter(
             reflectance_func, node_id=node_id, param=param
         )
 
@@ -218,7 +221,7 @@ class EradiateMaterialAdapter:
         if not ERADIATE_AVAILABLE:
             raise ImportError("Eradiate is not available")
 
-        result = {material.mat_id: {"type": "bilambertian", "id": material.mat_id}}
+        result = {material.mat_id: {"type": "bilambertian", "id": f"_mat_{material.mat_id}"}}
 
         return result
 
@@ -230,14 +233,14 @@ class EradiateMaterialAdapter:
 
         result = {}
 
-        node_id = material.mat_id
+        node_id = f"_mat_{material.mat_id}"
         for param, spectral_dict in [
             ("reflectance.value", material.reflectance),
             ("transmittance.value", material.transmittance),
         ]:
             # Convert dict to callable function
             spectral_func = _create_spectral_callable(spectral_dict)
-            result[f"{node_id}.{param}"] = _declare_mono_scene_parameter(
+            result[f"{material.mat_id}.{param}"] = _declare_mono_scene_parameter(
                 spectral_func, node_id=node_id, param=param
             )
 
@@ -251,7 +254,7 @@ class EradiateMaterialAdapter:
 
         # Important: to ensure that we use the 4-parameter RPV BRDF, we must
         # pass a value for `rho_c`
-        result = {material.mat_id: {"type": "rpv", "id": material.mat_id, "rho_c": 0.5}}
+        result = {material.mat_id: {"type": "rpv", "id": f"_mat_{material.mat_id}", "rho_c": 0.5}}
 
         return result
 
@@ -263,7 +266,7 @@ class EradiateMaterialAdapter:
 
         result = {}
 
-        node_id = material.mat_id
+        node_id = f"_mat_{material.mat_id}"
         for param, spectral_dict in [
             ("rho_0.value", material.rho_0),
             ("k.value", material.k),
@@ -272,7 +275,7 @@ class EradiateMaterialAdapter:
         ]:
             # Convert dict to callable function
             spectral_func = _create_spectral_callable(spectral_dict)
-            result[f"{node_id}.{param}"] = _declare_mono_scene_parameter(
+            result[f"{material.mat_id}.{param}"] = _declare_mono_scene_parameter(
                 spectral_func, node_id=node_id, param=param
             )
 
@@ -286,7 +289,7 @@ class EradiateMaterialAdapter:
 
         kdict = {
             "type": "ocean_legacy",
-            "id": material.mat_id,
+            "id": f"_mat_{material.mat_id}",
             "wavelength": 550.0,  # Default wavelength for ocean legacy material
             "chlorinity": getattr(material, "chlorinity", 0.0),
             "pigmentation": getattr(material, "pigmentation", 5.0),
@@ -301,7 +304,247 @@ class EradiateMaterialAdapter:
         if not ERADIATE_AVAILABLE:
             raise ImportError("Eradiate is not available")
 
-        return {}  # Ocean materials typically don't have spectral parameters
+        return {}
+
+    @staticmethod
+    def create_dielectric_kdict(material) -> dict:
+        """Generate Eradiate kernel dictionary for dielectric material."""
+        if not ERADIATE_AVAILABLE:
+            raise ImportError("Eradiate is not available")
+
+        kdict = {
+            "type": "dielectric",
+            "id": f"_mat_{material.mat_id}",
+            "int_ior": material.int_ior,
+            "ext_ior": material.ext_ior,
+        }
+        
+        if material.specular_reflectance is not None:
+            kdict["specular_reflectance"] = 0.0 
+        if material.specular_transmittance is not None:
+            kdict["specular_transmittance"] = 0.0
+            
+        return {material.mat_id: kdict}
+
+    @staticmethod
+    def create_dielectric_kpmap(material) -> dict:
+        """Generate Eradiate parameter map for dielectric material."""
+        if not ERADIATE_AVAILABLE:
+            raise ImportError("Eradiate is not available")
+
+        result = {}
+        node_id = f"_mat_{material.mat_id}"
+
+        if material.specular_reflectance is not None:
+            reflectance_func = _create_spectral_callable(material.specular_reflectance)
+            result[f"{material.mat_id}.specular_reflectance.value"] = _declare_mono_scene_parameter(
+                reflectance_func, node_id=node_id, param="specular_reflectance.value"
+            )
+            
+        if material.specular_transmittance is not None:
+            transmittance_func = _create_spectral_callable(material.specular_transmittance)
+            result[f"{material.mat_id}.specular_transmittance.value"] = _declare_mono_scene_parameter(
+                transmittance_func, node_id=node_id, param="specular_transmittance.value"
+            )
+
+        return result
+        
+    @staticmethod
+    def create_conductor_kdict(material) -> dict:
+        """Generate Eradiate kernel dictionary for conductor material."""
+        if not ERADIATE_AVAILABLE:
+            raise ImportError("Eradiate is not available")
+
+        kdict = {"type": "conductor", "id": f"_mat_{material.mat_id}"}
+
+        # Handle IOR specification (preset string or dict)
+        ior_spec = getattr(material, "ior", None)
+        if isinstance(ior_spec, str):
+            kdict["material"] = ior_spec
+        elif isinstance(ior_spec, dict):
+            if "preset" in ior_spec:
+                kdict["material"] = ior_spec["preset"]
+            elif "eta" in ior_spec and "k" in ior_spec:
+                # Add scalar values directly; spectral values are handled by kpmap
+                if isinstance(ior_spec["eta"], (int, float)):
+                    kdict["eta"] = ior_spec["eta"]
+                if isinstance(ior_spec["k"], (int, float)):
+                    kdict["k"] = ior_spec["k"]
+        
+        # Handle optional specular reflectance (placeholder for kpmap)
+        if getattr(material, "specular_reflectance", None) is not None:
+            kdict["specular_reflectance"] = 0.0  
+
+        return {material.mat_id: kdict}
+
+    @staticmethod
+    def create_conductor_kpmap(material) -> dict:
+        """Generate Eradiate parameter map for conductor material."""
+        if not ERADIATE_AVAILABLE:
+            raise ImportError("Eradiate is not available")
+
+        result = {}
+        node_id = f"_mat_{material.mat_id}"
+
+        # Handle spectral IOR from a dictionary
+        ior_spec = getattr(material, "ior", None)
+        if isinstance(ior_spec, dict):
+            for param_name in ["eta", "k"]:
+                if param_name in ior_spec and isinstance(ior_spec[param_name], dict):
+                    spectral_func = _create_spectral_callable(ior_spec[param_name])
+                    param_path = f"{param_name}.value"
+                    result[f"{material.mat_id}.{param_path}"] = _declare_mono_scene_parameter(
+                        spectral_func, node_id=node_id, param=param_path
+                    )
+
+        # Handle spectral reflectance override
+        spec_refl = getattr(material, "specular_reflectance", None)
+        if isinstance(spec_refl, dict):
+            reflectance_func = _create_spectral_callable(spec_refl)
+            param_path = "specular_reflectance.value"
+            result[f"{material.mat_id}.{param_path}"] = _declare_mono_scene_parameter(
+                reflectance_func, node_id=node_id, param=param_path
+            )
+
+        return result
+
+    @staticmethod
+    def create_rough_conductor_kdict(material) -> dict:
+        """Generate Eradiate kernel dictionary for rough conductor material."""
+        if not ERADIATE_AVAILABLE:
+            raise ImportError("Eradiate is not available")
+
+        kdict = {"type": "roughconductor", "id": f"_mat_{material.mat_id}"}
+
+        if hasattr(material, "distribution"):
+            kdict["distribution"] = material.distribution
+
+        # Roughness (alpha, with 'roughness' as a common alias)
+        # Anisotropic (alpha_u, alpha_v) takes precedence
+        if hasattr(material, "alpha_u") or hasattr(material, "alpha_v"):
+            if hasattr(material, "alpha_u") and not isinstance(material.alpha_u, dict):
+                kdict["alpha_u"] = material.alpha_u
+            if hasattr(material, "alpha_v") and not isinstance(material.alpha_v, dict):
+                kdict["alpha_v"] = material.alpha_v
+        else:
+            alpha = getattr(material, "alpha", getattr(material, "roughness", None))
+            if alpha is not None and not isinstance(alpha, dict):
+                kdict["alpha"] = alpha
+
+        # Sampling strategy
+        if hasattr(material, "sample_visible"):
+            kdict["sample_visible"] = material.sample_visible
+
+        # IOR specification (preset string or dict)
+        ior_spec = getattr(material, "ior", None)
+        if isinstance(ior_spec, str):
+            kdict["material"] = ior_spec
+        elif isinstance(ior_spec, dict):
+            if "preset" in ior_spec:
+                kdict["material"] = ior_spec["preset"]
+            elif "eta" in ior_spec and "k" in ior_spec:
+                if isinstance(ior_spec["eta"], (int, float)):
+                    kdict["eta"] = ior_spec["eta"]
+                if isinstance(ior_spec["k"], (int, float)):
+                    kdict["k"] = ior_spec["k"]
+        
+        # Optional specular reflectance (placeholder for kpmap)
+        if getattr(material, "specular_reflectance", None) is not None:
+            kdict["specular_reflectance"] = 0.0
+
+        return {material.mat_id: kdict}
+
+    @staticmethod
+    def create_rough_conductor_kpmap(material) -> dict:
+        """Generate Eradiate parameter map for rough conductor material."""
+        if not ERADIATE_AVAILABLE:
+            raise ImportError("Eradiate is not available")
+
+        result = {}
+        node_id = f"_mat_{material.mat_id}"
+
+        # Spectral roughness (alpha, alpha_u, alpha_v)
+        # Use a mapping to avoid repetitive code
+        param_map = {
+            "alpha": "alpha.value",
+            "roughness": "alpha.value",
+            "alpha_u": "alpha_u.value",
+            "alpha_v": "alpha_v.value",
+        }
+        for attr, param_path in param_map.items():
+            if f"{node_id}.{param_path}" in result: continue # Avoid overwriting with alias
+            
+            if attr == "alpha" and not hasattr(material, "alpha") and hasattr(material, "roughness"):
+                spectral_dict = getattr(material, "roughness", None)
+            else:
+                spectral_dict = getattr(material, attr, None)
+            if isinstance(spectral_dict, dict):
+                spectral_func = _create_spectral_callable(spectral_dict)
+                result[f"{material.mat_id}.{param_path}"] = _declare_mono_scene_parameter(
+                    spectral_func, node_id=node_id, param=param_path
+                )
+
+        # Spectral IOR (same as smooth conductor)
+        ior_spec = getattr(material, "ior", None)
+        if isinstance(ior_spec, dict):
+            for param_name in ["eta", "k"]:
+                if param_name in ior_spec and isinstance(ior_spec[param_name], dict):
+                    spectral_func = _create_spectral_callable(ior_spec[param_name])
+                    param_path = f"{param_name}.value"
+                    result[f"{material.mat_id}.{param_path}"] = _declare_mono_scene_parameter(
+                        spectral_func, node_id=node_id, param=param_path
+                    )
+
+        # Spectral reflectance override (same as smooth conductor)
+        spec_refl = getattr(material, "specular_reflectance", None)
+        if isinstance(spec_refl, dict):
+            reflectance_func = _create_spectral_callable(spec_refl)
+            param_path = "specular_reflectance.value"
+            result[f"{material.mat_id}.{param_path}"] = _declare_mono_scene_parameter(
+                reflectance_func, node_id=node_id, param=param_path
+            )
+
+        return result
+
+    @staticmethod
+    def create_plastic_kdict(material) -> dict:
+        """Generate Eradiate kernel dictionary for plastic material."""
+        if not ERADIATE_AVAILABLE:
+            raise ImportError("Eradiate is not available")
+
+        kdict = {
+            "type": "plastic",
+            "id": f"_mat_{material.mat_id}",
+            "int_ior": material.int_ior,
+            "ext_ior": material.ext_ior,
+            "diffuse_reflectance": 0.0,  # Will be updated by kpmap
+        }
+        
+        # Add optional parameters
+        if hasattr(material, 'roughness') and material.roughness > 0.0:
+            kdict["alpha"] = material.roughness
+            
+        if hasattr(material, 'nonlinear') and material.nonlinear:
+            kdict["nonlinear"] = True
+            
+        return {material.mat_id: kdict}
+
+    @staticmethod
+    def create_plastic_kpmap(material) -> dict:
+        """Generate Eradiate parameter map for plastic material."""
+        if not ERADIATE_AVAILABLE:
+            raise ImportError("Eradiate is not available")
+
+        result = {}
+        node_id = f"_mat_{material.mat_id}"
+
+        # Always need diffuse reflectance parameter
+        diffuse_func = _create_spectral_callable(material.diffuse_reflectance)
+        result[f"{node_id}.diffuse_reflectance.value"] = _declare_mono_scene_parameter(
+            diffuse_func, node_id=node_id, param="diffuse_reflectance.value"
+        )
+
+        return result
 
     @staticmethod
     def create_hamster_kdict(
@@ -373,5 +616,53 @@ class EradiateMaterialAdapter:
                 flags=UpdateParameter.Flags.SPECTRAL,
             )
         }
+        
+        return result
+
+    @staticmethod
+    def create_principled_kdict(material) -> dict:
+        """Generate Eradiate kernel dictionary for principled material."""
+        if not ERADIATE_AVAILABLE:
+            raise ImportError("Eradiate is not available")
+
+        result = {material.mat_id: {"type": "principled", "id": f"_mat_{material.mat_id}"}}
+        return result
+
+    @staticmethod
+    def create_principled_kpmap(material) -> dict:
+        """Generate Eradiate parameter map for principled material."""
+        if not ERADIATE_AVAILABLE:
+            raise ImportError("Eradiate is not available")
+
+        result = {}
+        node_id = f"_mat_{material.mat_id}"
+        
+        # Handle base_color parameter
+        base_color_func = _create_spectral_callable(material.base_color)
+        result[f"{node_id}.base_color.value"] = _declare_mono_scene_parameter(
+            base_color_func, node_id=node_id, param="base_color.value"
+        )
+        
+        # Handle scalar parameters
+        scalar_params = [
+            ("metallic", "metallic"),
+            ("roughness", "roughness"), 
+            ("specular", "specular"),
+            ("specular_tint", "specular_tint"),
+            ("anisotropic", "anisotropic"),
+            ("sheen", "sheen"),
+            ("sheen_tint", "sheen_tint"),
+            ("clearcoat", "clearcoat"),
+            ("clearcoat_roughness", "clearcoat_roughness"),
+        ]
+        
+        for attr_name, param_name in scalar_params:
+            if hasattr(material, attr_name):
+                attr_value = getattr(material, attr_name)
+                if attr_value is not None:
+                    scalar_func = _create_scalar_callable(attr_value)
+                    result[f"{node_id}.{param_name}"] = _declare_mono_scene_parameter(
+                        scalar_func, node_id=node_id, param=param_name
+                    )
         
         return result

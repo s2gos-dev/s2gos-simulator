@@ -84,10 +84,8 @@ class EradiateBackend(SimulationBackend):
         Returns:
             List of material IDs with "_mat_" prefix in texture index order
         """
-        if not scene_description.material_indices:
-            raise ValueError("SceneDescription must contain 'material_indices'")
-
         material_indices = scene_description.material_indices
+        print(material_indices)
 
         # Generate material IDs with "_mat_" prefix, ordered by texture index
         material_ids = []
@@ -252,40 +250,37 @@ class EradiateBackend(SimulationBackend):
         return self._process_results(experiment, output_dir)
 
     def _process_object_materials(self, scene_description: SceneDescription) -> None:
-        """Process object materials that are dict definitions and add them to scene materials.
-        
-        This method extracts material definitions from objects and adds them to the 
-        scene materials for unified processing, avoiding duplication.
+        """Validate that all object materials use string references only.
         
         Args:
-            scene_description: Scene description with objects that may contain material dicts
+            scene_description: Scene description with objects using string material references
+            
+        Raises:
+            ValueError: If any object has invalid material reference
         """
-        from s2gos_utils.scene.materials import Material
-        
         if not scene_description.objects:
             return
             
-        for obj in scene_description.objects:
+        for i, obj in enumerate(scene_description.objects):
             if "material" not in obj:
                 continue
                 
             material = obj["material"]
-            if isinstance(material, dict):
-                # Generate consistent material name
-                import sys
-                import os
-                sys.path.append('/home/gonzalezm/s2gos/s2gos/experimenting')
-                from mitsuba_xml_parser import generate_material_name
-                material_name = generate_material_name(material)
-                
-                # Add to scene materials if not already present (deduplication)
-                if material_name not in scene_description.materials:
-                    # Convert dict to Material object using existing pattern
-                    material_obj = Material.from_dict(material, id=material_name)
-                    scene_description.materials[material_name] = material_obj
-                
-                # Update object to use material reference instead of dict
-                obj["material"] = material_name
+            
+            if not isinstance(material, str):
+                raise ValueError(
+                    f"Object {i} has invalid material type {type(material).__name__}. "
+                    "Only string references are supported. "
+                    "Define materials in the scene's material library."
+                )
+            
+            # Validate material exists in scene library
+            if material not in scene_description.materials:
+                available = list(scene_description.materials.keys())
+                raise ValueError(
+                    f"Object {i} references unknown material '{material}'. "
+                    f"Available materials: {available}"
+                )
 
     def _create_experiment(self, scene_description: SceneDescription, scene_dir: UPath):
         """Create Eradiate experiment from scene description."""
@@ -301,9 +296,14 @@ class EradiateBackend(SimulationBackend):
             # Use adapter pattern to create Eradiate-specific dictionaries
             from s2gos_utils.scene.materials import (
                 BilambertianMaterial,
+                ConductorMaterial,
+                DielectricMaterial,
                 DiffuseMaterial,
                 OceanLegacyMaterial,
+                PlasticMaterial,
+                PrincipledMaterial,
                 RPVMaterial,
+                RoughConductorMaterial,
             )
 
             if isinstance(material, DiffuseMaterial):
@@ -318,7 +318,23 @@ class EradiateBackend(SimulationBackend):
             elif isinstance(material, OceanLegacyMaterial):
                 mat_kdict = adapter.create_ocean_kdict(material)
                 mat_kpmap = adapter.create_ocean_kpmap(material)
+            elif isinstance(material, DielectricMaterial):
+                mat_kdict = adapter.create_dielectric_kdict(material)
+                mat_kpmap = adapter.create_dielectric_kpmap(material)
+            elif isinstance(material, ConductorMaterial):
+                mat_kdict = adapter.create_conductor_kdict(material)
+                mat_kpmap = adapter.create_conductor_kpmap(material)
+            elif isinstance(material, RoughConductorMaterial):
+                mat_kdict = adapter.create_rough_conductor_kdict(material)
+                mat_kpmap = adapter.create_rough_conductor_kpmap(material)
+            elif isinstance(material, PlasticMaterial):
+                mat_kdict = adapter.create_plastic_kdict(material)
+                mat_kpmap = adapter.create_plastic_kpmap(material)
+            elif isinstance(material, PrincipledMaterial):
+                mat_kdict = adapter.create_principled_kdict(material)
+                mat_kpmap = adapter.create_principled_kpmap(material)
             else:
+                # Fallback to diffuse for unknown material types
                 mat_kdict = adapter.create_diffuse_kdict(material)
                 mat_kpmap = adapter.create_diffuse_kpmap(material)
 
@@ -369,15 +385,11 @@ class EradiateBackend(SimulationBackend):
                     "id": obj["id"]
                 }
                 
-                # Add material assignment
                 if "material" in obj:
                     material = obj["material"]
-                    # At this point, all materials should be string references due to preprocessing
                     if isinstance(material, str):
-                        # String reference - use as material ID with _mat_ prefix (following existing pattern)
                         obj_dict["bsdf"] = {"type": "ref", "id": f"_mat_{material}"}
                     else:
-                        # Fallback for any remaining edge cases
                         obj_dict["bsdf"] = {"type": "diffuse", "reflectance": {"type": "uniform", "value": 0.5}}
                 
                 # Add transformation (position + rotation + scale)
