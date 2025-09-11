@@ -3,6 +3,9 @@ from typing import Any, Dict, List, Optional, Union
 import numpy as np
 import xarray as xr
 from PIL import Image
+
+# Import coordinate transformation system
+from s2gos_utils.coordinates import CoordinateSystem
 from s2gos_utils.io.paths import open_file
 from s2gos_utils.scene import SceneDescription
 from upath import UPath
@@ -31,6 +34,7 @@ try:
     import eradiate
     import mitsuba as mi
     from eradiate.experiments import AtmosphereExperiment
+    from eradiate.radprops import AbsorptionDatabase
     from eradiate.scenes.atmosphere import (
         ExponentialParticleDistribution,
         GaussianParticleDistribution,
@@ -59,6 +63,7 @@ class EradiateBackend(SimulationBackend):
 
         eradiate_hints = simulation_config.backend_hints.get("eradiate", {})
         self._eradiate_mode = eradiate_hints.get("mode", "mono")
+        self._absorption_dataset = eradiate_hints.get("absorption_dataset")
 
         if ERADIATE_AVAILABLE:
             try:
@@ -85,7 +90,6 @@ class EradiateBackend(SimulationBackend):
             List of material IDs with "_mat_" prefix in texture index order
         """
         material_indices = scene_description.material_indices
-        print(material_indices)
 
         # Generate material IDs with "_mat_" prefix, ordered by texture index
         material_ids = []
@@ -237,9 +241,14 @@ class EradiateBackend(SimulationBackend):
         )
 
         experiment = self._create_experiment(scene_description, scene_dir)
-
         print("Executing Eradiate simulation...")
-        eradiate.run(experiment)
+        num_measures = len(experiment.measures)
+        print(f"Running {num_measures} measures separately...")
+        
+        for i_measure in range(num_measures):
+            measure_id = getattr(experiment.measures[i_measure], 'id', f'measure_{i_measure}')
+            print(f"Executing measure {i_measure + 1}/{num_measures}: {measure_id}")
+            eradiate.run(experiment, measures=i_measure)
 
         plot_image = kwargs.get("plot_image", False)
         if plot_image:
@@ -251,29 +260,29 @@ class EradiateBackend(SimulationBackend):
 
     def _process_object_materials(self, scene_description: SceneDescription) -> None:
         """Validate that all object materials use string references only.
-        
+
         Args:
             scene_description: Scene description with objects using string material references
-            
+
         Raises:
             ValueError: If any object has invalid material reference
         """
         if not scene_description.objects:
             return
-            
+
         for i, obj in enumerate(scene_description.objects):
             if "material" not in obj:
                 continue
-                
+
             material = obj["material"]
-            
+
             if not isinstance(material, str):
                 raise ValueError(
                     f"Object {i} has invalid material type {type(material).__name__}. "
                     "Only string references are supported. "
                     "Define materials in the scene's material library."
                 )
-            
+
             # Validate material exists in scene library
             if material not in scene_description.materials:
                 available = list(scene_description.materials.keys())
@@ -291,7 +300,9 @@ class EradiateBackend(SimulationBackend):
         # Process object materials that are dict definitions and add them to scene materials
         self._process_object_materials(scene_description)
 
-        hamster_data_dict = self._get_hamster_data_for_scene(scene_description, scene_dir)
+        hamster_data_dict = self._get_hamster_data_for_scene(
+            scene_description, scene_dir
+        )
         for mat_name, material in scene_description.materials.items():
             # Use adapter pattern to create Eradiate-specific dictionaries
             from s2gos_utils.scene.materials import (
@@ -299,11 +310,12 @@ class EradiateBackend(SimulationBackend):
                 ConductorMaterial,
                 DielectricMaterial,
                 DiffuseMaterial,
+                MeasuredMaterial,
                 OceanLegacyMaterial,
                 PlasticMaterial,
                 PrincipledMaterial,
-                RPVMaterial,
                 RoughConductorMaterial,
+                RPVMaterial,
             )
 
             if isinstance(material, DiffuseMaterial):
@@ -333,6 +345,9 @@ class EradiateBackend(SimulationBackend):
             elif isinstance(material, PrincipledMaterial):
                 mat_kdict = adapter.create_principled_kdict(material)
                 mat_kpmap = adapter.create_principled_kpmap(material)
+            elif isinstance(material, MeasuredMaterial):
+                mat_kdict = adapter.create_measured_kdict(material)
+                mat_kpmap = adapter.create_measured_kpmap(material)
             else:
                 # Fallback to diffuse for unknown material types
                 mat_kdict = adapter.create_diffuse_kdict(material)
@@ -340,25 +355,23 @@ class EradiateBackend(SimulationBackend):
 
             kdict.update(mat_kdict)
             kpmap.update(mat_kpmap)
-        
+
         # Create surface-specific HAMSTER baresoil materials when available
         if hamster_data_dict is not None:
             baresoil_material = scene_description.materials.get("baresoil")
             if baresoil_material:
                 for surface_name, hamster_data in hamster_data_dict.items():
                     hamster_material_id = f"_mat_baresoil_{surface_name}"
-                    
+
                     hamster_kdict = adapter.create_hamster_kdict(
-                        material_id=hamster_material_id,
-                        albedo_data=hamster_data
+                        material_id=hamster_material_id, albedo_data=hamster_data
                     )
 
                     hamster_kpmap = adapter.create_hamster_kpmap(
-                        material_id=hamster_material_id,
-                        albedo_data=hamster_data
+                        material_id=hamster_material_id, albedo_data=hamster_data
                     )
-                    
-                    kdict.update(hamster_kdict)  
+
+                    kdict.update(hamster_kdict)
                     kpmap.update(hamster_kpmap)
 
         # Get surface configurations from SceneDescription fields
@@ -367,13 +380,23 @@ class EradiateBackend(SimulationBackend):
 
         # Create surfaces from scene description
         hamster_available = hamster_data_dict is not None
-        kdict.update(self._create_target_surface(scene_description, scene_dir, hamster_available))
+        kdict.update(
+            self._create_target_surface(scene_description, scene_dir, hamster_available)
+        )
 
         if buffer:
-            kdict.update(self._create_buffer_surface(scene_description, scene_dir, hamster_available))
+            kdict.update(
+                self._create_buffer_surface(
+                    scene_description, scene_dir, hamster_available
+                )
+            )
 
         if background:
-            kdict.update(self._create_background_surface(scene_description, scene_dir, hamster_available))
+            kdict.update(
+                self._create_background_surface(
+                    scene_description, scene_dir, hamster_available
+                )
+            )
 
         # Process 3D objects from scene description
         if scene_description.objects:
@@ -382,47 +405,61 @@ class EradiateBackend(SimulationBackend):
                 obj_dict = {
                     "type": "ply",
                     "filename": str(object_mesh_path),
-                    "id": obj["id"]
+                    "id": obj["id"],
                 }
                 
+                # Add face_normals parameter if specified
+                if "face_normals" in obj:
+                    obj_dict["face_normals"] = obj["face_normals"]
+
                 if "material" in obj:
                     material = obj["material"]
                     if isinstance(material, str):
                         obj_dict["bsdf"] = {"type": "ref", "id": f"_mat_{material}"}
                     else:
-                        obj_dict["bsdf"] = {"type": "diffuse", "reflectance": {"type": "uniform", "value": 0.5}}
-                
+                        obj_dict["bsdf"] = {
+                            "type": "diffuse",
+                            "reflectance": {"type": "uniform", "value": 0.5},
+                        }
+
                 # Add transformation (position + rotation + scale)
                 if "position" in obj and "scale" in obj:
-                    x, y, z = obj["position"] 
+                    x, y, z = obj["position"]
                     scale = obj["scale"]
-                    
+
                     # Build transform: translate @ rotate @ scale
                     to_world = mi.ScalarTransform4f.translate([x, y, z])
-                    
+
                     # Apply rotations if present (in degrees)
                     if "rotation" in obj:
                         rx, ry, rz = obj["rotation"]
                         if rx != 0:
-                            to_world = to_world @ mi.ScalarTransform4f.rotate([1, 0, 0], rx)
+                            to_world = to_world @ mi.ScalarTransform4f.rotate(
+                                [1, 0, 0], rx
+                            )
                         if ry != 0:
-                            to_world = to_world @ mi.ScalarTransform4f.rotate([0, 1, 0], ry)
+                            to_world = to_world @ mi.ScalarTransform4f.rotate(
+                                [0, 1, 0], ry
+                            )
                         if rz != 0:
-                            to_world = to_world @ mi.ScalarTransform4f.rotate([0, 0, 1], rz)
-                    
+                            to_world = to_world @ mi.ScalarTransform4f.rotate(
+                                [0, 0, 1], rz
+                            )
+
                     to_world = to_world @ mi.ScalarTransform4f.scale(scale)
                     obj_dict["to_world"] = to_world
-                
+
                 kdict[obj["id"]] = obj_dict
 
         atmosphere = self._create_atmosphere_from_config(scene_description)
 
         illumination = self._translate_illumination()
 
-        measures = self._translate_sensors()
+        measures = self._translate_sensors(scene_description)
 
         geometry = self._create_geometry_from_atmosphere(scene_description)
 
+        print(measures)
         return AtmosphereExperiment(
             geometry=geometry,
             atmosphere=atmosphere,
@@ -478,6 +515,7 @@ class EradiateBackend(SimulationBackend):
                 "identifier": thermoprops_id,
                 "z": np.linspace(altitude_min, altitude_max, int(num_steps)) * ureg.m,
             },
+            absorption_data=self._absorption_dataset if self._absorption_dataset is not None else AbsorptionDatabase.default(),
             has_absorption=mol_dict.get("has_absorption", True),
             has_scattering=mol_dict.get("has_scattering", True),
         )
@@ -630,14 +668,14 @@ class EradiateBackend(SimulationBackend):
 
         return target_vec.tolist(), direction.tolist()
 
-    def _translate_sensors(self) -> List[Dict[str, Any]]:
+    def _translate_sensors(self, scene_description: SceneDescription) -> List[Dict[str, Any]]:
         """Translate generic sensors and radiative quantities to Eradiate measures."""
         measures = []
 
         # Translate sensor-based measures
         for sensor in self.simulation_config.sensors:
             if isinstance(sensor, SatelliteSensor):
-                measures.append(self._translate_satellite_sensor(sensor))
+                measures.append(self._translate_satellite_sensor(sensor, scene_description))
             elif isinstance(sensor, UAVSensor):
                 measures.append(self._translate_uav_sensor(sensor))
             elif isinstance(sensor, GroundSensor):
@@ -651,19 +689,50 @@ class EradiateBackend(SimulationBackend):
 
         return measures
 
-    def _translate_satellite_sensor(self, sensor: SatelliteSensor) -> Dict[str, Any]:
-        """Translate satellite sensor to Eradiate measure."""
+    def _translate_satellite_sensor(self, sensor: SatelliteSensor, scene_description: SceneDescription) -> Dict[str, Any]:
+        """Translate satellite sensor to Eradiate mpdistant measure using scene coordinate system."""
+        
+        # Extract scene center from scene description
+        scene_location = scene_description.location
+        scene_center_lat = scene_location.get('center_lat')
+        scene_center_lon = scene_location.get('center_lon') 
+        
+        if scene_center_lat is None or scene_center_lon is None:
+            raise ValueError("Scene description missing center_lat or center_lon in location")
+        
+        coords = CoordinateSystem(scene_center_lat, scene_center_lon)
+        
+        # Get target area dimensions
+        if isinstance(sensor.target_size_km, (int, float)):
+            width_km = height_km = sensor.target_size_km
+        else:
+            width_km, height_km = sensor.target_size_km
+        
+        # Create target rectangle using coordinate system utilities
+        target_bounds = coords.create_rectangle(
+            sensor.target_center_lat,
+            sensor.target_center_lon,
+            width_km,
+            height_km
+        )
+        
+        # Create measure configuration using target bounds
         measure_config = {
-            "type": "distant",
-            "id": sensor.id,
-            "spp": sensor.samples_per_pixel,
-            "srf": self._translate_srf(sensor.srf),
+            "type": "mpdistant",
             "construct": "from_angles",
             "angles": [sensor.viewing.zenith, sensor.viewing.azimuth],
+            "id": sensor.id,
+            "film_resolution": sensor.film_resolution,
+            "target": {
+                "type": "rectangle",
+                "xmin": target_bounds["xmin"],
+                "xmax": target_bounds["xmax"],
+                "ymin": target_bounds["ymin"],
+                "ymax": target_bounds["ymax"]
+            },
+            "srf": self._translate_srf(sensor.srf),
+            "spp": sensor.samples_per_pixel,
         }
-
-        if sensor.viewing.target:
-            measure_config["target"] = sensor.viewing.target
 
         return measure_config
 
@@ -847,9 +916,11 @@ class EradiateBackend(SimulationBackend):
             "illumination_type": self.simulation_config.illumination.type,
         }
 
-
     def _create_target_surface(
-        self, scene_description: SceneDescription, scene_dir: UPath, hamster_available: bool = False
+        self,
+        scene_description: SceneDescription,
+        scene_dir: UPath,
+        hamster_available: bool = False,
     ) -> Dict[str, Any]:
         """Create target surface from SceneDescription."""
         target_config = scene_description.target
@@ -863,7 +934,7 @@ class EradiateBackend(SimulationBackend):
         selection_texture_data = np.atleast_3d(selection_texture_data)
 
         material_ids = self._get_material_ids_from_scene(scene_description)
-        
+
         if hamster_available:
             material_ids = [
                 "_mat_baresoil_target" if mat_id == "_mat_baresoil" else mat_id
@@ -895,7 +966,10 @@ class EradiateBackend(SimulationBackend):
         }
 
     def _create_buffer_surface(
-        self, scene_description: SceneDescription, scene_dir: UPath, hamster_available: bool = False
+        self,
+        scene_description: SceneDescription,
+        scene_dir: UPath,
+        hamster_available: bool = False,
     ) -> Dict[str, Any]:
         """Create buffer surface from SceneDescription."""
         buffer_config = scene_description.buffer
@@ -914,7 +988,7 @@ class EradiateBackend(SimulationBackend):
         buffer_selection_texture_data = np.atleast_3d(buffer_selection_texture_data)
 
         material_ids = self._get_material_ids_from_scene(scene_description)
-        
+
         if hamster_available:
             material_ids = [
                 "_mat_baresoil_buffer" if mat_id == "_mat_baresoil" else mat_id
@@ -973,7 +1047,10 @@ class EradiateBackend(SimulationBackend):
         return result
 
     def _create_background_surface(
-        self, scene_description: SceneDescription, scene_dir: UPath, hamster_available: bool = False
+        self,
+        scene_description: SceneDescription,
+        scene_dir: UPath,
+        hamster_available: bool = False,
     ) -> Dict[str, Any]:
         """Create background surface from SceneDescription."""
         background_config = scene_description.background
@@ -992,7 +1069,7 @@ class EradiateBackend(SimulationBackend):
         )
 
         material_ids = self._get_material_ids_from_scene(scene_description)
-        
+
         if hamster_available:
             material_ids = [
                 "_mat_baresoil_background" if mat_id == "_mat_baresoil" else mat_id
@@ -1043,26 +1120,43 @@ class EradiateBackend(SimulationBackend):
 
             if "radiance" in sensor_data:
                 radiance_data = sensor_data["radiance"]
-
+                print(radiance_data)
                 if "x_index" in radiance_data.dims and "y_index" in radiance_data.dims:
-                    img = (
-                        dataarray_to_rgb(
-                            radiance_data,
-                            channels=[("w", 660), ("w", 550), ("w", 440)],
-                            normalize=False,
+                    # Handle 2D imagery data
+                    wavelengths = radiance_data.coords["w"].values
+                    
+                    if len(wavelengths) >= 3:
+                        # Multi-band data - create RGB image
+                        target_wavelengths = [660, 550, 440]
+                        actual_wavelengths = [radiance_data.sel(w=w_val, method='nearest').w.item() for w_val in target_wavelengths]
+                        corrected_channels = [("w", w_val) for w_val in actual_wavelengths]
+
+                        img = (
+                            dataarray_to_rgb(
+                                radiance_data,
+                                channels=corrected_channels,
+                                normalize=False,
+                            )
+                            * 1.8
                         )
-                        * 1.8
-                    )
+                        img = np.clip(img, 0, 1)
+                        rgb_output = output_dir / f"{id_to_plot}_rgb.png"
+                        plt_img = (img * 255).astype(np.uint8)
+                        print(f"RGB image saved to: {rgb_output}")
+                    else:
+                        # Single-band data - create grayscale image  
+                        img_data = radiance_data.squeeze().values
+                        # Normalize to 0-1 range
+                        img_normalized = (img_data - img_data.min()) / (img_data.max() - img_data.min())
+                        img_normalized = np.clip(img_normalized, 0, 1)
+                        plt_img = (img_normalized * 255).astype(np.uint8)
+                        rgb_output = output_dir / f"{id_to_plot}_grayscale.png"
+                        print(f"Grayscale image saved to: {rgb_output}")
 
-                    img = np.clip(img, 0, 1)
-
-                    rgb_output = output_dir / f"{id_to_plot}_rgb.png"
-                    plt_img = (img * 255).astype(np.uint8)
+                    # Save the image
                     rgb_image = Image.fromarray(plt_img)
                     with open_file(rgb_output, "wb") as f:
                         rgb_image.save(f, format="PNG")
-
-                    print(f"Camera RGB image saved to: {rgb_output}")
 
                 else:
                     spectral_output = output_dir / f"{id_to_plot}_spectrum.png"
@@ -1110,8 +1204,9 @@ class EradiateBackend(SimulationBackend):
 
         metadata = self._create_output_metadata(output_dir)
 
-        # Process regular sensor results
+        # Process regular sensor results - each measure saves to separate file
         if isinstance(results, dict):
+            print(f"Processing {len(results)} measure results...")
             for sensor_id, dataset in results.items():
                 sensor_output = (
                     output_dir / f"{self.simulation_config.name}_{sensor_id}.zarr"
@@ -1121,7 +1216,7 @@ class EradiateBackend(SimulationBackend):
                 dataset.attrs["sensor_id"] = sensor_id
 
                 dataset.to_zarr(sensor_output, mode="w")
-                print(f"Sensor '{sensor_id}' saved to {sensor_output}")
+                print(f"Measure '{sensor_id}' saved to {sensor_output}")
 
         else:
             results_ds = results
@@ -1145,70 +1240,90 @@ class EradiateBackend(SimulationBackend):
         self, scene_description: SceneDescription, scene_dir: UPath
     ) -> Optional[dict]:
         """Load HAMSTER albedo data from zarr files referenced in scene description areas.
-        
+
         Args:
             scene_description: Scene description with HAMSTER data file paths in area sections
             scene_dir: Directory containing the scene description file (for resolving relative paths)
-            
+
         Returns:
             Dict with loaded HAMSTER albedo DataArrays for each surface area, or None
             Format: {'target': target_subset, 'buffer': buffer_subset, 'background': bg_subset}
         """
         try:
             hamster_data_files = {}
-            
-            if scene_description.target and 'hamster_data' in scene_description.target:
-                hamster_data_files['target'] = scene_description.target['hamster_data']
-                
-            if scene_description.buffer and 'hamster_data' in scene_description.buffer:
-                hamster_data_files['buffer'] = scene_description.buffer['hamster_data']
-                
-            if scene_description.background and 'hamster_data' in scene_description.background:
-                hamster_data_files['background'] = scene_description.background['hamster_data']
-                
+
+            if scene_description.target and "hamster_data" in scene_description.target:
+                hamster_data_files["target"] = scene_description.target["hamster_data"]
+
+            if scene_description.buffer and "hamster_data" in scene_description.buffer:
+                hamster_data_files["buffer"] = scene_description.buffer["hamster_data"]
+
+            if (
+                scene_description.background
+                and "hamster_data" in scene_description.background
+            ):
+                hamster_data_files["background"] = scene_description.background[
+                    "hamster_data"
+                ]
+
             if not hamster_data_files:
                 import logging
+
                 logging.info("No HAMSTER data files found in scene description areas")
                 return None
-            
+
             hamster_data = {}
             base_path = scene_dir
-            
+
             import logging
+
             import xarray as xr
             from s2gos_utils.io.paths import exists
-            
+
             for area, relative_path in hamster_data_files.items():
                 file_path = base_path / relative_path
                 if not exists(file_path):
-                    logging.warning(f"HAMSTER data file not found: {file_path}, skipping {area} area")
+                    logging.warning(
+                        f"HAMSTER data file not found: {file_path}, skipping {area} area"
+                    )
                     continue
-                    
+
                 try:
                     dataset = xr.open_zarr(file_path)
                     data_vars = list(dataset.data_vars.keys())
                     if not data_vars:
-                        logging.warning(f"No data variables found in HAMSTER file: {file_path}")
+                        logging.warning(
+                            f"No data variables found in HAMSTER file: {file_path}"
+                        )
                         continue
-                        
+
                     albedo_data = dataset[data_vars[0]]
                     hamster_data[area] = albedo_data
-                    logging.info(f"Loaded HAMSTER data for {area} area from {file_path}: {albedo_data.sizes}")
-                    
+                    logging.info(
+                        f"Loaded HAMSTER data for {area} area from {file_path}: {albedo_data.sizes}"
+                    )
+
                 except Exception as e:
-                    logging.warning(f"Failed to load HAMSTER data from {file_path}: {e}")
+                    logging.warning(
+                        f"Failed to load HAMSTER data from {file_path}: {e}"
+                    )
                     continue
-            
+
             if hamster_data:
-                logging.info(f"Successfully loaded HAMSTER data for {len(hamster_data)} surface areas")
+                logging.info(
+                    f"Successfully loaded HAMSTER data for {len(hamster_data)} surface areas"
+                )
                 return hamster_data
             else:
                 logging.warning("No HAMSTER data could be loaded from any files")
                 return None
-            
+
         except Exception as e:
             import logging
-            logging.warning(f"Could not load HAMSTER data: {e}, falling back to standard baresoil")
+
+            logging.warning(
+                f"Could not load HAMSTER data: {e}, falling back to standard baresoil"
+            )
             return None
 
     def _create_dummy_radiative_quantity_result(

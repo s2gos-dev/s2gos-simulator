@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 import astropy.units as u
 from astropy.coordinates import AltAz, EarthLocation, get_sun
@@ -417,6 +417,18 @@ class SatelliteSensor(BaseSensor):
     platform: SatellitePlatform
     instrument: SatelliteInstrument
     band: str
+    film_resolution: Tuple[int, int] = Field(
+        ..., description="Pixel grid dimensions (width, height) for 2D imaging"
+    )
+    target_center_lat: float = Field(
+        ..., description="Target center latitude in WGS84 decimal degrees"
+    )
+    target_center_lon: float = Field(
+        ..., description="Target center longitude in WGS84 decimal degrees"
+    )
+    target_size_km: Union[float, Tuple[float, float]] = Field(
+        ..., description="Target area size: float for square (km), tuple for rectangular (width_km, height_km)"
+    )
 
     @model_validator(mode="after")
     def validate_and_set_defaults(self):
@@ -472,7 +484,37 @@ class SatelliteSensor(BaseSensor):
             else:
                 self.id = f"{base_id}_nadir"
 
+        # Validate film resolution limits
+        width, height = self.film_resolution
+        if width <= 0 or height <= 0:
+            raise ValueError("Film resolution dimensions must be positive integers")
+        if width > 2048 or height > 2048:
+            raise ValueError(
+                f"Film resolution {self.film_resolution} exceeds maximum of 2048x2048 pixels. "
+                "Consider reducing resolution for memory and performance reasons."
+            )
+
         return self
+
+    @property
+    def pixel_size_m(self) -> Tuple[float, float]:
+        """
+        Calculate ground pixel size in meters.
+        
+        Returns:
+            Tuple of (pixel_size_x_m, pixel_size_y_m) in meters per pixel
+        """
+        if isinstance(self.target_size_km, (int, float)):
+            # Square area
+            width_km = height_km = self.target_size_km
+        else:
+            # Rectangular area
+            width_km, height_km = self.target_size_km
+        
+        pixel_size_x = (width_km * 1000) / self.film_resolution[0]
+        pixel_size_y = (height_km * 1000) / self.film_resolution[1]
+        
+        return pixel_size_x, pixel_size_y
 
 
 class UAVInstrumentType(str, Enum):

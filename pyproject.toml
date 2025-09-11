@@ -9,13 +9,13 @@ requires-python = ">=3.10"
 version = "0.0.1"
 dependencies = [
     "s2gos-utils",
-    "eradiate[kernel]",
+    "eradiate[kernel]==0.31.1.dev0",
     "pydantic>=2.0.0",
     "pyyaml>=6.0.0",
     "numpy>=1.24.0",
     "pillow>=9.0.0",
     "xarray>=2023.1.0",
-    "zarr>=2.10.0",
+    "zarr>=2.18,<3.0",
 ]
 
 [project.optional-dependencies]
