@@ -4,13 +4,11 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
-import astropy.units as u
-from astropy.coordinates import AltAz, EarthLocation, get_sun
-from astropy.time import Time
 from pydantic import BaseModel, Field, field_validator, model_validator
 from s2gos_utils import validate_config_version
 from s2gos_utils.io.paths import open_file, read_json
 from s2gos_utils.typing import PathLike
+from skyfield.api import load, wgs84
 
 from ._version import get_version
 
@@ -239,21 +237,42 @@ class DirectionalIllumination(Illumination):
         Raises:
             ValueError: If the sun is below the horizon at the specified time.
         """
-        location = EarthLocation(lat=latitude * u.deg, lon=longitude * u.deg)
-        obs_time = Time(time)
-
-        altaz_frame = AltAz(obstime=obs_time, location=location)
-        sun_altaz = get_sun(obs_time).transform_to(altaz_frame)
-
-        zenith_angle = 90 * u.deg - sun_altaz.alt
-
-        astropy_az = sun_altaz.az
-        eradiate_az = (90 * u.deg - astropy_az) % (360 * u.deg)
-
+        # Load timescale and ephemeris
+        ts = load.timescale()
+        planets = load('de421.bsp')
+        
+        # Convert datetime to skyfield time
+        skyfield_time = ts.utc(
+            time.year, time.month, time.day,
+            time.hour, time.minute, time.second
+        )
+        
+        # Define observer location
+        earth = planets['earth']
+        location = earth + wgs84.latlon(latitude, longitude)
+        
+        # Calculate sun position
+        sun = planets['sun']
+        astrometric = location.at(skyfield_time).observe(sun)
+        apparent = astrometric.apparent()
+        alt, az, _ = apparent.altaz()
+        
+        # Check if sun is above horizon
+        if alt.degrees < 0:
+            raise ValueError(f"Sun is below horizon (altitude: {alt.degrees:.2f}°) at the specified time")
+        
+        # Convert to zenith angle (degrees)
+        zenith_angle = 90.0 - alt.degrees
+        
+        # Convert azimuth to Eradiate convention
+        # Skyfield: 0°=North, 90°=East, 180°=South, 270°=West  
+        # Eradiate: 0°=East, 90°=North, 180°=West, 270°=South
+        eradiate_az = (90.0 - az.degrees) % 360.0
+        
         return cls(
-            zenith=zenith_angle.deg,
-            azimuth=eradiate_az.deg,
-            irradiate_dataset=irradiance_dataset,
+            zenith=zenith_angle,
+            azimuth=eradiate_az,
+            irradiance_dataset=irradiance_dataset,
         )
 
 
