@@ -239,36 +239,37 @@ class DirectionalIllumination(Illumination):
         """
         # Load timescale and ephemeris
         ts = load.timescale()
-        planets = load('de421.bsp')
-        
+        planets = load("de421.bsp")
+
         # Convert datetime to skyfield time
         skyfield_time = ts.utc(
-            time.year, time.month, time.day,
-            time.hour, time.minute, time.second
+            time.year, time.month, time.day, time.hour, time.minute, time.second
         )
-        
+
         # Define observer location
-        earth = planets['earth']
+        earth = planets["earth"]
         location = earth + wgs84.latlon(latitude, longitude)
-        
+
         # Calculate sun position
-        sun = planets['sun']
+        sun = planets["sun"]
         astrometric = location.at(skyfield_time).observe(sun)
         apparent = astrometric.apparent()
         alt, az, _ = apparent.altaz()
-        
+
         # Check if sun is above horizon
         if alt.degrees < 0:
-            raise ValueError(f"Sun is below horizon (altitude: {alt.degrees:.2f}°) at the specified time")
-        
+            raise ValueError(
+                f"Sun is below horizon (altitude: {alt.degrees:.2f}°) at the specified time"
+            )
+
         # Convert to zenith angle (degrees)
         zenith_angle = 90.0 - alt.degrees
-        
+
         # Convert azimuth to Eradiate convention
-        # Skyfield: 0°=North, 90°=East, 180°=South, 270°=West  
+        # Skyfield: 0°=North, 90°=East, 180°=South, 270°=West
         # Eradiate: 0°=East, 90°=North, 180°=West, 270°=South
         eradiate_az = (90.0 - az.degrees) % 360.0
-        
+
         return cls(
             zenith=zenith_angle,
             azimuth=eradiate_az,
@@ -446,7 +447,8 @@ class SatelliteSensor(BaseSensor):
         ..., description="Target center longitude in WGS84 decimal degrees"
     )
     target_size_km: Union[float, Tuple[float, float]] = Field(
-        ..., description="Target area size: float for square (km), tuple for rectangular (width_km, height_km)"
+        ...,
+        description="Target area size: float for square (km), tuple for rectangular (width_km, height_km)",
     )
 
     @model_validator(mode="after")
@@ -519,7 +521,7 @@ class SatelliteSensor(BaseSensor):
     def pixel_size_m(self) -> Tuple[float, float]:
         """
         Calculate ground pixel size in meters.
-        
+
         Returns:
             Tuple of (pixel_size_x_m, pixel_size_y_m) in meters per pixel
         """
@@ -529,10 +531,10 @@ class SatelliteSensor(BaseSensor):
         else:
             # Rectangular area
             width_km, height_km = self.target_size_km
-        
+
         pixel_size_x = (width_km * 1000) / self.film_resolution[0]
         pixel_size_y = (height_km * 1000) / self.film_resolution[1]
-        
+
         return pixel_size_x, pixel_size_y
 
 

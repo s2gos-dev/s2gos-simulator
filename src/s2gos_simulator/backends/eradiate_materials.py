@@ -96,15 +96,12 @@ def _create_spectral_callable(
     file_path = spectral_dict["path"]
     variable = spectral_dict["variable"]
 
-    # Resolve the path relative to generator data directory
-    if not UPath(file_path).is_absolute():
-        # Assume relative to s2gos-generator data directory
-        import s2gos_generator
-
-        generator_dir = UPath(s2gos_generator.__file__).parent
-        full_path = generator_dir / "data" / file_path
-    else:
-        full_path = UPath(file_path)
+    full_path = UPath(file_path)
+    if not full_path.is_absolute():
+        raise ValueError(
+            f"Spectral file path must be absolute: {file_path}. "
+            "Paths should be resolved to absolute at material load time."
+        )
 
     # Load spectral data using Eradiate
     try:
@@ -207,13 +204,9 @@ class EradiateMaterialAdapter:
         if not ERADIATE_AVAILABLE:
             raise ImportError("Eradiate is not available")
 
-        # Setting the initial reflectance to 0 can help detect parameter update issues
         result = {
-            material.mat_id: {
-                "type": "diffuse",
-                "id": f"_mat_{material.mat_id}",
-                "reflectance": 0.0,
-            }
+            "type": "diffuse",
+            "reflectance": 0.0,
         }
 
         return result
@@ -242,9 +235,7 @@ class EradiateMaterialAdapter:
         if not ERADIATE_AVAILABLE:
             raise ImportError("Eradiate is not available")
 
-        result = {
-            material.mat_id: {"type": "bilambertian", "id": f"_mat_{material.mat_id}"}
-        }
+        result = {"type": "bilambertian"}
 
         return result
 
@@ -275,14 +266,9 @@ class EradiateMaterialAdapter:
         if not ERADIATE_AVAILABLE:
             raise ImportError("Eradiate is not available")
 
-        # Important: to ensure that we use the 4-parameter RPV BRDF, we must
-        # pass a value for `rho_c`
         result = {
-            material.mat_id: {
-                "type": "rpv",
-                "id": f"_mat_{material.mat_id}",
-                "rho_c": 0.5,
-            }
+            "type": "rpv",
+            "rho_c": 0.5,
         }
 
         return result
@@ -318,14 +304,13 @@ class EradiateMaterialAdapter:
 
         kdict = {
             "type": "ocean_legacy",
-            "id": f"_mat_{material.mat_id}",
             "wavelength": 550.0,  # Default wavelength for ocean legacy material
             "chlorinity": getattr(material, "chlorinity", 0.0),
             "pigmentation": getattr(material, "pigmentation", 5.0),
             "wind_speed": getattr(material, "wind_speed", 2.0),
             "wind_direction": getattr(material, "wind_direction", 90.0),
         }
-        return {material.mat_id: kdict}
+        return kdict
 
     @staticmethod
     def create_ocean_kpmap(_material) -> dict:
@@ -343,7 +328,6 @@ class EradiateMaterialAdapter:
 
         kdict = {
             "type": "dielectric",
-            "id": f"_mat_{material.mat_id}",
             "int_ior": material.int_ior,
             "ext_ior": material.ext_ior,
         }
@@ -353,7 +337,7 @@ class EradiateMaterialAdapter:
         if material.specular_transmittance is not None:
             kdict["specular_transmittance"] = 0.0
 
-        return {material.mat_id: kdict}
+        return kdict
 
     @staticmethod
     def create_dielectric_kpmap(material) -> dict:
@@ -394,7 +378,7 @@ class EradiateMaterialAdapter:
         if not ERADIATE_AVAILABLE:
             raise ImportError("Eradiate is not available")
 
-        kdict = {"type": "conductor", "id": f"_mat_{material.mat_id}"}
+        kdict = {"type": "conductor"}
 
         # Handle material preset directly (S2GOS format)
         if hasattr(material, "material") and material.material is not None:
@@ -413,7 +397,7 @@ class EradiateMaterialAdapter:
                         kdict["eta"] = ior_spec["eta"]
                     if isinstance(ior_spec["k"], (int, float)):
                         kdict["k"] = ior_spec["k"]
-        
+
         # Handle explicit eta/k values (S2GOS format)
         if hasattr(material, "eta") and material.eta is not None:
             if isinstance(material.eta, dict):
@@ -432,7 +416,7 @@ class EradiateMaterialAdapter:
         if getattr(material, "specular_reflectance", None) is not None:
             kdict["specular_reflectance"] = 0.0
 
-        return {material.mat_id: kdict}
+        return kdict
 
     @staticmethod
     def create_conductor_kpmap(material) -> dict:
@@ -455,7 +439,7 @@ class EradiateMaterialAdapter:
                             spectral_func, node_id=node_id, param=param_path
                         )
                     )
-        
+
         # Handle spectral IOR from a dictionary (legacy format)
         ior_spec = getattr(material, "ior", None)
         if isinstance(ior_spec, dict):
@@ -488,7 +472,7 @@ class EradiateMaterialAdapter:
         if not ERADIATE_AVAILABLE:
             raise ImportError("Eradiate is not available")
 
-        kdict = {"type": "roughconductor", "id": f"_mat_{material.mat_id}"}
+        kdict = {"type": "roughconductor"}
 
         if hasattr(material, "distribution"):
             kdict["distribution"] = material.distribution
@@ -496,9 +480,17 @@ class EradiateMaterialAdapter:
         # Roughness (alpha, with 'roughness' as a common alias)
         # Anisotropic (alpha_u, alpha_v) takes precedence
         if hasattr(material, "alpha_u") or hasattr(material, "alpha_v"):
-            if hasattr(material, "alpha_u") and material.alpha_u is not None and not isinstance(material.alpha_u, dict):
+            if (
+                hasattr(material, "alpha_u")
+                and material.alpha_u is not None
+                and not isinstance(material.alpha_u, dict)
+            ):
                 kdict["alpha_u"] = material.alpha_u
-            if hasattr(material, "alpha_v") and material.alpha_v is not None and not isinstance(material.alpha_v, dict):
+            if (
+                hasattr(material, "alpha_v")
+                and material.alpha_v is not None
+                and not isinstance(material.alpha_v, dict)
+            ):
                 kdict["alpha_v"] = material.alpha_v
         else:
             alpha = getattr(material, "alpha", getattr(material, "roughness", None))
@@ -525,7 +517,7 @@ class EradiateMaterialAdapter:
                         kdict["eta"] = ior_spec["eta"]
                     if isinstance(ior_spec["k"], (int, float)):
                         kdict["k"] = ior_spec["k"]
-        
+
         # Handle explicit eta/k values (S2GOS format)
         if hasattr(material, "eta") and material.eta is not None:
             if isinstance(material.eta, dict):
@@ -536,7 +528,7 @@ class EradiateMaterialAdapter:
         if hasattr(material, "k") and material.k is not None:
             if isinstance(material.k, dict):
                 # Spectral handled by kpmap
-                pass  
+                pass
             else:
                 kdict["k"] = material.k
 
@@ -544,7 +536,7 @@ class EradiateMaterialAdapter:
         if getattr(material, "specular_reflectance", None) is not None:
             kdict["specular_reflectance"] = 0.0
 
-        return {material.mat_id: kdict}
+        return kdict
 
     @staticmethod
     def create_rough_conductor_kpmap(material) -> dict:
@@ -595,8 +587,7 @@ class EradiateMaterialAdapter:
                             spectral_func, node_id=node_id, param=param_path
                         )
                     )
-        
-        # Spectral IOR (legacy format, same as smooth conductor)
+
         ior_spec = getattr(material, "ior", None)
         if isinstance(ior_spec, dict):
             for param_name in ["eta", "k"]:
@@ -611,7 +602,6 @@ class EradiateMaterialAdapter:
                             )
                         )
 
-        # Spectral reflectance override (same as smooth conductor)
         spec_refl = getattr(material, "specular_reflectance", None)
         if isinstance(spec_refl, dict):
             reflectance_func = _create_spectral_callable(spec_refl)
@@ -630,20 +620,23 @@ class EradiateMaterialAdapter:
 
         kdict = {
             "type": "plastic",
-            "id": f"_mat_{material.mat_id}",
             "int_ior": material.int_ior,
             "ext_ior": material.ext_ior,
-            "diffuse_reflectance": 0.0,  # Will be updated by kpmap
+            "diffuse_reflectance": 0.0,
         }
 
         # Add optional parameters
-        if hasattr(material, "roughness") and material.roughness is not None and material.roughness > 0.0:
+        if (
+            hasattr(material, "roughness")
+            and material.roughness is not None
+            and material.roughness > 0.0
+        ):
             kdict["alpha"] = material.roughness
 
         if hasattr(material, "nonlinear") and material.nonlinear:
             kdict["nonlinear"] = True
 
-        return {material.mat_id: kdict}
+        return kdict
 
     @staticmethod
     def create_plastic_kpmap(material) -> dict:
@@ -654,7 +647,6 @@ class EradiateMaterialAdapter:
         result = {}
         node_id = f"_mat_{material.mat_id}"
 
-        # Always need diffuse reflectance parameter
         diffuse_func = _create_spectral_callable(material.diffuse_reflectance)
         result[f"{node_id}.diffuse_reflectance.value"] = _declare_mono_scene_parameter(
             diffuse_func, node_id=node_id, param="diffuse_reflectance.value"
@@ -675,11 +667,13 @@ class EradiateMaterialAdapter:
         """
         texture_data = np.ones_like(albedo_data.values[:, :, :3])
         texture_id = f"texture_{material_id}"
-        
+
         # Validate texture data - ensure it has valid dimensions
         if texture_data.size == 0:
-            raise ValueError(f"HAMSTER texture data is empty (0x0) for {material_id}. "
-                           "This likely means the HAMSTER data has no coverage for the scene area.")
+            raise ValueError(
+                f"HAMSTER texture data is empty (0x0) for {material_id}. "
+                "This likely means the HAMSTER data has no coverage for the scene area."
+            )
 
         result = {
             texture_id: {
@@ -692,7 +686,6 @@ class EradiateMaterialAdapter:
             },
             material_id: {
                 "type": "diffuse",
-                "id": material_id,
                 "reflectance": {"type": "ref", "id": texture_id},
             },
         }
@@ -740,9 +733,7 @@ class EradiateMaterialAdapter:
         if not ERADIATE_AVAILABLE:
             raise ImportError("Eradiate is not available")
 
-        result = {
-            material.mat_id: {"type": "principled", "id": f"_mat_{material.mat_id}"}
-        }
+        result = {"type": "principled"}
         return result
 
     @staticmethod
@@ -790,18 +781,14 @@ class EradiateMaterialAdapter:
         if not ERADIATE_AVAILABLE:
             raise ImportError("Eradiate is not available")
 
-        kdict = {
-            "type": "measured",
-            "id": f"_mat_{material.mat_id}",
-            "filename": material.filename
-        }
+        kdict = {"type": "measured", "filename": material.filename}
 
-        return {material.mat_id: kdict}
+        return kdict
 
     @staticmethod
     def create_measured_kpmap(material) -> dict:
         """Generate Eradiate parameter map for measured BSDF material.
-        
+
         Measured BSDF materials don't require spectral parameter updates
         as all data is contained in the .bsdf file.
         """

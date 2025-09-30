@@ -1,3 +1,4 @@
+import logging
 from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
@@ -87,15 +88,14 @@ class EradiateBackend(SimulationBackend):
             scene_description: SceneDescription object
 
         Returns:
-            List of material IDs with "_mat_" prefix in texture index order
+            List of material IDs in texture index order
         """
         material_indices = scene_description.material_indices
 
-        # Generate material IDs with "_mat_" prefix, ordered by texture index
         material_ids = []
         for texture_index in sorted(material_indices.keys(), key=int):
             material_name = material_indices[texture_index]
-            material_ids.append(f"_mat_{material_name}")
+            material_ids.append(material_name)
 
         return material_ids
 
@@ -244,9 +244,11 @@ class EradiateBackend(SimulationBackend):
         print("Executing Eradiate simulation...")
         num_measures = len(experiment.measures)
         print(f"Running {num_measures} measures separately...")
-        
+
         for i_measure in range(num_measures):
-            measure_id = getattr(experiment.measures[i_measure], 'id', f'measure_{i_measure}')
+            measure_id = getattr(
+                experiment.measures[i_measure], "id", f"measure_{i_measure}"
+            )
             print(f"Executing measure {i_measure + 1}/{num_measures}: {measure_id}")
             eradiate.run(experiment, measures=i_measure)
 
@@ -291,6 +293,71 @@ class EradiateBackend(SimulationBackend):
                     f"Available materials: {available}"
                 )
 
+    def _expand_vegetation_collection(
+        self, vegetation_collection_obj: dict, scene_dir: UPath, kdict: dict
+    ):
+        """Expand vegetation collection to individual Mitsuba instances efficiently.
+
+        Args:
+            vegetation_collection_obj: Vegetation collection object from scene description
+            scene_dir: Scene directory for resolving paths
+            kdict: Eradiate kernel dictionary to add instances to
+        """
+        data_file = vegetation_collection_obj["data_file"]
+        binary_path = scene_dir / data_file
+
+        try:
+            vegetation_data = np.load(binary_path)
+            count = len(vegetation_data)
+            shapegroup_ref = vegetation_collection_obj["shapegroup_ref"]
+            collection_name = vegetation_collection_obj.get(
+                "collection_name", "vegetation"
+            )
+
+            logging.info(
+                f"Expanding vegetation collection '{collection_name}' with {count} instances"
+            )
+
+            for i in range(count):
+                instance_id = f"vegetation_instance_{collection_name}_{i}"
+
+                x, y, z = (
+                    float(vegetation_data[i]["x"]),
+                    float(vegetation_data[i]["y"]),
+                    float(vegetation_data[i]["z"]),
+                )
+                rotation = float(vegetation_data[i]["rotation"])
+                scale = float(vegetation_data[i]["scale"])
+                tilt_x = (
+                    float(vegetation_data[i]["tilt_x"])
+                    if "tilt_x" in vegetation_data.dtype.names
+                    else 0.0
+                )
+                tilt_y = (
+                    float(vegetation_data[i]["tilt_y"])
+                    if "tilt_y" in vegetation_data.dtype.names
+                    else 0.0
+                )
+
+                to_world = mi.ScalarTransform4f.translate([x, y, z])
+                to_world = to_world @ mi.ScalarTransform4f.rotate([1, 0, 0], 90)
+                to_world = to_world @ mi.ScalarTransform4f.rotate([0, 1, 0], rotation)
+                to_world = to_world @ mi.ScalarTransform4f.rotate([1, 0, 0], tilt_x)
+                to_world = to_world @ mi.ScalarTransform4f.rotate([0, 1, 0], tilt_y)
+                to_world = to_world @ mi.ScalarTransform4f.scale(scale)
+
+                kdict[instance_id] = {
+                    "type": "instance",
+                    "shapegroup": {"type": "ref", "id": shapegroup_ref},
+                    "to_world": to_world,
+                }
+
+        except Exception as e:
+            logging.error(
+                f"Failed to expand vegetation collection '{vegetation_collection_obj.get('collection_name', 'unknown')}': {e}"
+            )
+            raise
+
     def _create_experiment(self, scene_description: SceneDescription, scene_dir: UPath):
         """Create Eradiate experiment from scene description."""
         kdict = {}
@@ -319,49 +386,57 @@ class EradiateBackend(SimulationBackend):
             )
 
             if isinstance(material, DiffuseMaterial):
-                mat_kdict = adapter.create_diffuse_kdict(material)
+                mat_def = adapter.create_diffuse_kdict(material)
+                mat_kdict = {f"_mat_{mat_name}": mat_def}
                 mat_kpmap = adapter.create_diffuse_kpmap(material)
             elif isinstance(material, BilambertianMaterial):
-                mat_kdict = adapter.create_bilambertian_kdict(material)
+                mat_def = adapter.create_bilambertian_kdict(material)
+                mat_kdict = {f"_mat_{mat_name}": mat_def}
                 mat_kpmap = adapter.create_bilambertian_kpmap(material)
             elif isinstance(material, RPVMaterial):
-                mat_kdict = adapter.create_rpv_kdict(material)
+                mat_def = adapter.create_rpv_kdict(material)
+                mat_kdict = {f"_mat_{mat_name}": mat_def}
                 mat_kpmap = adapter.create_rpv_kpmap(material)
             elif isinstance(material, OceanLegacyMaterial):
-                mat_kdict = adapter.create_ocean_kdict(material)
+                mat_def = adapter.create_ocean_kdict(material)
+                mat_kdict = {f"_mat_{mat_name}": mat_def}
                 mat_kpmap = adapter.create_ocean_kpmap(material)
             elif isinstance(material, DielectricMaterial):
-                mat_kdict = adapter.create_dielectric_kdict(material)
+                mat_def = adapter.create_dielectric_kdict(material)
+                mat_kdict = {f"_mat_{mat_name}": mat_def}
                 mat_kpmap = adapter.create_dielectric_kpmap(material)
             elif isinstance(material, ConductorMaterial):
-                mat_kdict = adapter.create_conductor_kdict(material)
+                mat_def = adapter.create_conductor_kdict(material)
+                mat_kdict = {f"_mat_{mat_name}": mat_def}
                 mat_kpmap = adapter.create_conductor_kpmap(material)
             elif isinstance(material, RoughConductorMaterial):
-                mat_kdict = adapter.create_rough_conductor_kdict(material)
+                mat_def = adapter.create_rough_conductor_kdict(material)
+                mat_kdict = {f"_mat_{mat_name}": mat_def}
                 mat_kpmap = adapter.create_rough_conductor_kpmap(material)
             elif isinstance(material, PlasticMaterial):
-                mat_kdict = adapter.create_plastic_kdict(material)
+                mat_def = adapter.create_plastic_kdict(material)
+                mat_kdict = {f"_mat_{mat_name}": mat_def}
                 mat_kpmap = adapter.create_plastic_kpmap(material)
             elif isinstance(material, PrincipledMaterial):
-                mat_kdict = adapter.create_principled_kdict(material)
+                mat_def = adapter.create_principled_kdict(material)
+                mat_kdict = {f"_mat_{mat_name}": mat_def}
                 mat_kpmap = adapter.create_principled_kpmap(material)
             elif isinstance(material, MeasuredMaterial):
-                mat_kdict = adapter.create_measured_kdict(material)
+                mat_def = adapter.create_measured_kdict(material)
+                mat_kdict = {f"_mat_{mat_name}": mat_def}
                 mat_kpmap = adapter.create_measured_kpmap(material)
             else:
-                # Fallback to diffuse for unknown material types
-                mat_kdict = adapter.create_diffuse_kdict(material)
+                mat_def = adapter.create_diffuse_kdict(material)
+                mat_kdict = {f"_mat_{mat_name}": mat_def}
                 mat_kpmap = adapter.create_diffuse_kpmap(material)
 
             kdict.update(mat_kdict)
             kpmap.update(mat_kpmap)
 
-        # Create surface-specific HAMSTER baresoil materials when available
         if hamster_data_dict is not None:
-            baresoil_material = scene_description.materials.get("baresoil")
-            if baresoil_material:
-                for surface_name, hamster_data in hamster_data_dict.items():
-                    hamster_material_id = f"_mat_baresoil_{surface_name}"
+            for surface_name, hamster_data in hamster_data_dict.items():
+                for mat_name in scene_description.materials.keys():
+                    hamster_material_id = f"_mat_{mat_name}_{surface_name}"
 
                     hamster_kdict = adapter.create_hamster_kdict(
                         material_id=hamster_material_id, albedo_data=hamster_data
@@ -374,11 +449,9 @@ class EradiateBackend(SimulationBackend):
                     kdict.update(hamster_kdict)
                     kpmap.update(hamster_kpmap)
 
-        # Get surface configurations from SceneDescription fields
         buffer = scene_description.buffer
         background = scene_description.background
 
-        # Create surfaces from scene description
         hamster_available = hamster_data_dict is not None
         kdict.update(
             self._create_target_surface(scene_description, scene_dir, hamster_available)
@@ -401,55 +474,134 @@ class EradiateBackend(SimulationBackend):
         # Process 3D objects from scene description
         if scene_description.objects:
             for obj in scene_description.objects:
-                object_mesh_path = scene_dir / obj["mesh"]
-                obj_dict = {
-                    "type": "ply",
-                    "filename": str(object_mesh_path),
-                    "id": obj["id"],
-                }
-                
-                # Add face_normals parameter if specified
-                if "face_normals" in obj:
-                    obj_dict["face_normals"] = obj["face_normals"]
+                obj_type = obj.get("type", "ply")
 
-                if "material" in obj:
-                    material = obj["material"]
-                    if isinstance(material, str):
-                        obj_dict["bsdf"] = {"type": "ref", "id": f"_mat_{material}"}
-                    else:
-                        obj_dict["bsdf"] = {
-                            "type": "diffuse",
-                            "reflectance": {"type": "uniform", "value": 0.5},
-                        }
+                if obj_type == "shapegroup":
+                    obj_dict = {"type": "shapegroup"}
+                    if "id" in obj:
+                        obj_dict["id"] = obj["id"]
 
-                # Add transformation (position + rotation + scale)
-                if "position" in obj and "scale" in obj:
-                    x, y, z = obj["position"]
-                    scale = obj["scale"]
+                    for key, value in obj.items():
+                        if key not in ["type", "id", "object_id"]:
+                            if isinstance(value, dict) and value.get("type") == "ply":
+                                shape_dict = {"type": "ply"}
+                                if "filename" in value:
+                                    mesh_path = scene_dir / value["filename"]
+                                    shape_dict["filename"] = str(mesh_path)
+                                if "face_normals" in value:
+                                    shape_dict["face_normals"] = value["face_normals"]
+                                if "bsdf" in value:
+                                    shape_dict["bsdf"] = value["bsdf"]
+                                obj_dict[key] = shape_dict
 
-                    # Build transform: translate @ rotate @ scale
-                    to_world = mi.ScalarTransform4f.translate([x, y, z])
+                            elif isinstance(value, dict) and value.get("type") in [
+                                "sphere",
+                                "cube",
+                                "cylinder",
+                                "rectangle",
+                                "disk",
+                            ]:
+                                obj_dict[key] = value
 
-                    # Apply rotations if present (in degrees)
-                    if "rotation" in obj:
-                        rx, ry, rz = obj["rotation"]
-                        if rx != 0:
-                            to_world = to_world @ mi.ScalarTransform4f.rotate(
-                                [1, 0, 0], rx
-                            )
-                        if ry != 0:
-                            to_world = to_world @ mi.ScalarTransform4f.rotate(
-                                [0, 1, 0], ry
-                            )
-                        if rz != 0:
-                            to_world = to_world @ mi.ScalarTransform4f.rotate(
-                                [0, 0, 1], rz
-                            )
+                            elif not isinstance(value, dict):
+                                obj_dict[key] = value
 
-                    to_world = to_world @ mi.ScalarTransform4f.scale(scale)
-                    obj_dict["to_world"] = to_world
+                            else:
+                                logging.warning(
+                                    f"Skipping unrecognized entry in shapegroup '{key}': {value.get('type', 'unknown')}"
+                                )
+                                continue
 
-                kdict[obj["id"]] = obj_dict
+                elif obj_type == "instance":
+                    obj_dict = {"type": "instance", "shapegroup": obj["shapegroup"]}
+                    if "object_id" in obj:
+                        obj_dict["id"] = obj["object_id"]
+
+                    if "to_world" in obj:
+                        transform_spec = obj["to_world"]
+                        if transform_spec.get("type") == "transform":
+                            to_world = mi.ScalarTransform4f()
+
+                            if "translate" in transform_spec:
+                                x, y, z = transform_spec["translate"]
+                                to_world = to_world @ mi.ScalarTransform4f.translate(
+                                    [x, y, z]
+                                )
+
+                            if "rotate" in transform_spec:
+                                rx, ry, rz = transform_spec["rotate"]
+                                if rx != 0:
+                                    to_world = to_world @ mi.ScalarTransform4f.rotate(
+                                        [1, 0, 0], rx
+                                    )
+                                if ry != 0:
+                                    to_world = to_world @ mi.ScalarTransform4f.rotate(
+                                        [0, 1, 0], ry
+                                    )
+                                if rz != 0:
+                                    to_world = to_world @ mi.ScalarTransform4f.rotate(
+                                        [0, 0, 1], rz
+                                    )
+
+                            if "scale" in transform_spec:
+                                scale = transform_spec["scale"]
+                                to_world = to_world @ mi.ScalarTransform4f.scale(scale)
+
+                            obj_dict["to_world"] = to_world
+                        else:
+                            obj_dict["to_world"] = obj["to_world"]
+
+                elif obj_type == "vegetation_collection":
+                    self._expand_vegetation_collection(obj, scene_dir, kdict)
+                    continue
+
+                else:
+                    object_mesh_path = scene_dir / obj["mesh"]
+                    obj_dict = {
+                        "type": "ply",
+                        "filename": str(object_mesh_path),
+                        "id": obj["id"],
+                    }
+
+                    if "face_normals" in obj:
+                        obj_dict["face_normals"] = obj["face_normals"]
+
+                    if "material" in obj:
+                        material = obj["material"]
+                        if isinstance(material, str):
+                            obj_dict["bsdf"] = {"type": "ref", "id": material}
+                        else:
+                            obj_dict["bsdf"] = {
+                                "type": "diffuse",
+                                "reflectance": {"type": "uniform", "value": 0.5},
+                            }
+
+                    if "position" in obj and "scale" in obj:
+                        x, y, z = obj["position"]
+                        scale = obj["scale"]
+
+                        to_world = mi.ScalarTransform4f.translate([x, y, z])
+
+                        if "rotation" in obj:
+                            rx, ry, rz = obj["rotation"]
+                            if rx != 0:
+                                to_world = to_world @ mi.ScalarTransform4f.rotate(
+                                    [1, 0, 0], rx
+                                )
+                            if ry != 0:
+                                to_world = to_world @ mi.ScalarTransform4f.rotate(
+                                    [0, 1, 0], ry
+                                )
+                            if rz != 0:
+                                to_world = to_world @ mi.ScalarTransform4f.rotate(
+                                    [0, 0, 1], rz
+                                )
+
+                        to_world = to_world @ mi.ScalarTransform4f.scale(scale)
+                        obj_dict["to_world"] = to_world
+
+                obj_id = obj.get("id") or obj.get("object_id", f"object_{len(kdict)}")
+                kdict[obj_id] = obj_dict
 
         atmosphere = self._create_atmosphere_from_config(scene_description)
 
@@ -458,6 +610,8 @@ class EradiateBackend(SimulationBackend):
         measures = self._translate_sensors(scene_description)
 
         geometry = self._create_geometry_from_atmosphere(scene_description)
+
+        self._validate_material_ids(kdict, scene_description)
 
         print(measures)
         return AtmosphereExperiment(
@@ -515,7 +669,9 @@ class EradiateBackend(SimulationBackend):
                 "identifier": thermoprops_id,
                 "z": np.linspace(altitude_min, altitude_max, int(num_steps)) * ureg.m,
             },
-            absorption_data=self._absorption_dataset if self._absorption_dataset is not None else AbsorptionDatabase.default(),
+            absorption_data=self._absorption_dataset
+            if self._absorption_dataset is not None
+            else AbsorptionDatabase.default(),
             has_absorption=mol_dict.get("has_absorption", True),
             has_scattering=mol_dict.get("has_scattering", True),
         )
@@ -668,14 +824,17 @@ class EradiateBackend(SimulationBackend):
 
         return target_vec.tolist(), direction.tolist()
 
-    def _translate_sensors(self, scene_description: SceneDescription) -> List[Dict[str, Any]]:
+    def _translate_sensors(
+        self, scene_description: SceneDescription
+    ) -> List[Dict[str, Any]]:
         """Translate generic sensors and radiative quantities to Eradiate measures."""
         measures = []
 
-        # Translate sensor-based measures
         for sensor in self.simulation_config.sensors:
             if isinstance(sensor, SatelliteSensor):
-                measures.append(self._translate_satellite_sensor(sensor, scene_description))
+                measures.append(
+                    self._translate_satellite_sensor(sensor, scene_description)
+                )
             elif isinstance(sensor, UAVSensor):
                 measures.append(self._translate_uav_sensor(sensor))
             elif isinstance(sensor, GroundSensor):
@@ -683,40 +842,36 @@ class EradiateBackend(SimulationBackend):
             else:
                 raise ValueError(f"Unsupported sensor type: {type(sensor)}")
 
-        # Translate radiative quantity measures
         for rad_quantity in self.simulation_config.radiative_quantities:
             measures.append(self._translate_radiative_quantity(rad_quantity))
 
         return measures
 
-    def _translate_satellite_sensor(self, sensor: SatelliteSensor, scene_description: SceneDescription) -> Dict[str, Any]:
+    def _translate_satellite_sensor(
+        self, sensor: SatelliteSensor, scene_description: SceneDescription
+    ) -> Dict[str, Any]:
         """Translate satellite sensor to Eradiate mpdistant measure using scene coordinate system."""
-        
-        # Extract scene center from scene description
+
         scene_location = scene_description.location
-        scene_center_lat = scene_location.get('center_lat')
-        scene_center_lon = scene_location.get('center_lon') 
-        
+        scene_center_lat = scene_location.get("center_lat")
+        scene_center_lon = scene_location.get("center_lon")
+
         if scene_center_lat is None or scene_center_lon is None:
-            raise ValueError("Scene description missing center_lat or center_lon in location")
-        
+            raise ValueError(
+                "Scene description missing center_lat or center_lon in location"
+            )
+
         coords = CoordinateSystem(scene_center_lat, scene_center_lon)
-        
-        # Get target area dimensions
+
         if isinstance(sensor.target_size_km, (int, float)):
             width_km = height_km = sensor.target_size_km
         else:
             width_km, height_km = sensor.target_size_km
-        
-        # Create target rectangle using coordinate system utilities
+
         target_bounds = coords.create_rectangle(
-            sensor.target_center_lat,
-            sensor.target_center_lon,
-            width_km,
-            height_km
+            sensor.target_center_lat, sensor.target_center_lon, width_km, height_km
         )
-        
-        # Create measure configuration using target bounds
+
         measure_config = {
             "type": "mpdistant",
             "construct": "from_angles",
@@ -728,7 +883,7 @@ class EradiateBackend(SimulationBackend):
                 "xmin": target_bounds["xmin"],
                 "xmax": target_bounds["xmax"],
                 "ymin": target_bounds["ymin"],
-                "ymax": target_bounds["ymax"]
+                "ymax": target_bounds["ymax"],
             },
             "srf": self._translate_srf(sensor.srf),
             "spp": sensor.samples_per_pixel,
@@ -936,10 +1091,7 @@ class EradiateBackend(SimulationBackend):
         material_ids = self._get_material_ids_from_scene(scene_description)
 
         if hamster_available:
-            material_ids = [
-                "_mat_baresoil_target" if mat_id == "_mat_baresoil" else mat_id
-                for mat_id in material_ids
-            ]
+            material_ids = [f"{mat_id}_target" for mat_id in material_ids]
 
         return {
             "terrain_material": {
@@ -953,7 +1105,7 @@ class EradiateBackend(SimulationBackend):
                     "data": selection_texture_data,
                 },
                 **{
-                    f"bsdf_{i:02d}": {"type": "ref", "id": mat_id}
+                    f"terrain_bsdf_{i:02d}": {"type": "ref", "id": f"_mat_{mat_id}"}
                     for i, mat_id in enumerate(material_ids)
                 },
             },
@@ -990,10 +1142,7 @@ class EradiateBackend(SimulationBackend):
         material_ids = self._get_material_ids_from_scene(scene_description)
 
         if hamster_available:
-            material_ids = [
-                "_mat_baresoil_buffer" if mat_id == "_mat_baresoil" else mat_id
-                for mat_id in material_ids
-            ]
+            material_ids = [f"{mat_id}_buffer" for mat_id in material_ids]
 
         result = {
             "buffer_material": {
@@ -1007,7 +1156,7 @@ class EradiateBackend(SimulationBackend):
                     "data": buffer_selection_texture_data,
                 },
                 **{
-                    f"bsdf_{i:02d}": {"type": "ref", "id": mat_id}
+                    f"buffer_bsdf_{i:02d}": {"type": "ref", "id": f"_mat_{mat_id}"}
                     for i, mat_id in enumerate(material_ids)
                 },
             }
@@ -1071,10 +1220,7 @@ class EradiateBackend(SimulationBackend):
         material_ids = self._get_material_ids_from_scene(scene_description)
 
         if hamster_available:
-            material_ids = [
-                "_mat_baresoil_background" if mat_id == "_mat_baresoil" else mat_id
-                for mat_id in material_ids
-            ]
+            material_ids = [f"{mat_id}_background" for mat_id in material_ids]
 
         result = {
             "background_material": {
@@ -1088,7 +1234,7 @@ class EradiateBackend(SimulationBackend):
                     "data": background_selection_texture_data,
                 },
                 **{
-                    f"bsdf_{i:02d}": {"type": "ref", "id": mat_id}
+                    f"background_bsdf_{i:02d}": {"type": "ref", "id": f"_mat_{mat_id}"}
                     for i, mat_id in enumerate(material_ids)
                 },
             }
@@ -1109,6 +1255,46 @@ class EradiateBackend(SimulationBackend):
 
         return result
 
+    def _validate_material_ids(self, kdict: dict, scene_description=None) -> None:
+        """Validate material IDs to prevent Eradiate parsing issues."""
+        issues = []
+
+        for key, value in kdict.items():
+            if isinstance(value, dict) and value.get("type") in [
+                "diffuse",
+                "bilambertian",
+                "rpv",
+                "conductor",
+                "dielectric",
+            ]:
+                if "." in key:
+                    issues.append(
+                        f"Material ID '{key}' contains dots which may cause parsing issues"
+                    )
+                if key.isdigit():
+                    issues.append(
+                        f"Material ID '{key}' is purely numeric which may cause parsing issues"
+                    )
+
+        for key, value in kdict.items():
+            if isinstance(value, dict) and value.get("type") == "shapegroup":
+                for comp_key, comp_value in value.items():
+                    if isinstance(comp_value, dict) and comp_value.get("type") == "ply":
+                        bsdf = comp_value.get("bsdf", {})
+                        if bsdf.get("type") == "ref":
+                            ref_id = bsdf.get("id")
+                            if ref_id and ref_id not in kdict:
+                                issues.append(
+                                    f"Shape component '{comp_key}' references undefined material '{ref_id}'"
+                                )
+
+        if issues:
+            logging.warning(f"Material validation found {len(issues)} issues:")
+            for issue in issues:
+                logging.warning(f"  - {issue}")
+        else:
+            logging.info("Material validation passed - no issues found")
+
     def _create_rgb_visualization(self, experiment, output_dir: UPath, id_to_plot: str):
         """Create RGB visualization from camera results."""
         try:
@@ -1120,16 +1306,20 @@ class EradiateBackend(SimulationBackend):
 
             if "radiance" in sensor_data:
                 radiance_data = sensor_data["radiance"]
-                print(radiance_data)
                 if "x_index" in radiance_data.dims and "y_index" in radiance_data.dims:
                     # Handle 2D imagery data
                     wavelengths = radiance_data.coords["w"].values
-                    
+
                     if len(wavelengths) >= 3:
                         # Multi-band data - create RGB image
                         target_wavelengths = [660, 550, 440]
-                        actual_wavelengths = [radiance_data.sel(w=w_val, method='nearest').w.item() for w_val in target_wavelengths]
-                        corrected_channels = [("w", w_val) for w_val in actual_wavelengths]
+                        actual_wavelengths = [
+                            radiance_data.sel(w=w_val, method="nearest").w.item()
+                            for w_val in target_wavelengths
+                        ]
+                        corrected_channels = [
+                            ("w", w_val) for w_val in actual_wavelengths
+                        ]
 
                         img = (
                             dataarray_to_rgb(
@@ -1144,10 +1334,12 @@ class EradiateBackend(SimulationBackend):
                         plt_img = (img * 255).astype(np.uint8)
                         print(f"RGB image saved to: {rgb_output}")
                     else:
-                        # Single-band data - create grayscale image  
+                        # Single-band data - create grayscale image
                         img_data = radiance_data.squeeze().values
                         # Normalize to 0-1 range
-                        img_normalized = (img_data - img_data.min()) / (img_data.max() - img_data.min())
+                        img_normalized = (img_data - img_data.min()) / (
+                            img_data.max() - img_data.min()
+                        )
                         img_normalized = np.clip(img_normalized, 0, 1)
                         plt_img = (img_normalized * 255).astype(np.uint8)
                         rgb_output = output_dir / f"{id_to_plot}_grayscale.png"
