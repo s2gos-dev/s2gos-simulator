@@ -35,9 +35,10 @@ def _create_spectral_callable(
 ) -> Callable[["KernelContext"], float]:
     """Create callable function from spectral parameter dictionary.
 
-    Supports both spectral file references and uniform values:
+    Supports spectral file references, uniform values, and interpolated spectra:
     - File reference: {"path": "spectrum.nc", "variable": "reflectance"}
     - Uniform value: {"type": "uniform", "value": 0.5}
+    - Interpolated: {"type": "interpolated", "wavelengths": [400, 500, 600], "values": [0.2, 0.5, 0.3]}
 
     Args:
         spectral_dict: Dictionary with spectral data specification
@@ -88,9 +89,41 @@ def _create_spectral_callable(
                 f"Invalid uniform value format: {uniform_value}. Expected float, RGB array, or single value."
             )
 
+    if spectral_dict.get("type") == "interpolated":
+        from eradiate.units import unit_registry as ureg
+
+        wavelengths = spectral_dict["wavelengths"]
+        values = spectral_dict["values"]
+        wavelength_unit = spectral_dict.get("wavelength_unit", "nm")
+
+        wavelengths_with_units = np.array(wavelengths) * ureg(wavelength_unit)
+        values_array = np.array(values) * ureg.dimensionless
+
+        try:
+            spectrum = InterpolatedSpectrum(
+                wavelengths=wavelengths_with_units, values=values_array
+            )
+
+            def interpolated_func(ctx: "KernelContext") -> float:
+                return spectrum.eval(ctx.si).m_as("dimensionless")
+
+            logging.info(
+                f"Created interpolated spectrum: {len(wavelengths)} wavelength points "
+                f"from {wavelengths[0]} to {wavelengths[-1]} {wavelength_unit}"
+            )
+            return interpolated_func
+
+        except Exception as e:
+            raise ValueError(
+                f"Failed to create interpolated spectrum from wavelengths={wavelengths}, values={values}: {e}"
+            ) from e
+
     if "path" not in spectral_dict or "variable" not in spectral_dict:
         raise ValueError(
-            f"Invalid spectral dictionary format: {spectral_dict}. Must contain 'path' and 'variable' fields."
+            f"Invalid spectral dictionary format: {spectral_dict}. "
+            "Must be one of: file reference ({'path': ..., 'variable': ...}), "
+            "uniform value ({'type': 'uniform', 'value': ...}), or "
+            "interpolated spectrum ({'type': 'interpolated', 'wavelengths': [...], 'values': [...]})."
         )
 
     file_path = spectral_dict["path"]
