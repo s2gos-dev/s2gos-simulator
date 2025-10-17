@@ -380,6 +380,9 @@ ViewingType = Union[
 class RadiativeQuantityConfig(BaseModel):
     """Configuration for radiative quantities independent of sensors."""
 
+    id: Optional[str] = Field(
+        None, description="Unique identifier for this radiative quantity measurement"
+    )
     quantity: MeasurementType = Field(
         ..., description="Type of radiative quantity to calculate"
     )
@@ -396,8 +399,25 @@ class RadiativeQuantityConfig(BaseModel):
         lt=360.0,
         description="Viewing azimuth angle for directional quantities",
     )
+    target_lat: float = (
+        Field(
+            0,
+            description="Viewing azimuth angle for directional quantities",
+        ),
+    )
+    target_lon: float = (
+        Field(
+            0,
+            description="Viewing azimuth angle for directional quantities",
+        ),
+    )
     samples_per_pixel: int = Field(
         64, ge=1, description="Number of samples per pixel for Monte Carlo calculations"
+    )
+    reference_panel_offset_m: Optional[float] = Field(
+        None,
+        ge=0.0,
+        description="Height offset above terrain for HDRF reference panel (accounts for vegetation height). Required for HDRF measurements.",
     )
 
     @model_validator(mode="after")
@@ -408,6 +428,15 @@ class RadiativeQuantityConfig(BaseModel):
                 raise ValueError(
                     f"{self.quantity} requires viewing_zenith and viewing_azimuth"
                 )
+
+        if self.quantity == MeasurementType.HDRF:
+            if self.reference_panel_offset_m is None:
+                raise ValueError(
+                    "HDRF measurements require explicit reference_panel_offset_m "
+                    "(height above terrain for reference panel placement)"
+                )
+            if self.target_lat is None or self.target_lon is None:
+                raise ValueError("HDRF measurements require target_lat and target_lon")
 
         return self
 

@@ -30,6 +30,7 @@ from ..config import (
     UAVInstrumentType,
     UAVSensor,
 )
+from ..hdrf_processor import HDRFProcessor
 
 try:
     import eradiate
@@ -51,6 +52,8 @@ try:
     ERADIATE_AVAILABLE = True
 except ImportError:
     ERADIATE_AVAILABLE = False
+
+HDRF_RAY_OFFSET = 0.1
 
 
 class EradiateBackend(SimulationBackend):
@@ -219,7 +222,21 @@ class EradiateBackend(SimulationBackend):
         output_dir: Optional[UPath] = None,
         **kwargs,
     ) -> xr.Dataset:
-        """Run Eradiate simulation from scene description."""
+        """Run Eradiate simulation from scene description.
+
+        Automatically detects HDRF measurements and executes dual simulation workflow
+        (actual + white reference) if needed. For standard measurements, runs single
+        simulation.
+
+        Args:
+            scene_description: Scene description from s2gos_generator
+            scene_dir: Directory containing scene assets
+            output_dir: Output directory (defaults to scene_dir/eradiate_renders)
+            **kwargs: Additional options (plot_image, id_to_plot, etc.)
+
+        Returns:
+            xarray Dataset containing all simulation results (including HDRF if requested)
+        """
         if not self.is_available():
             raise RuntimeError("Eradiate is not available")
 
@@ -240,7 +257,43 @@ class EradiateBackend(SimulationBackend):
             f"Measurement types: {[mt.value for mt in self.simulation_config.output_quantities]}"
         )
 
+        hdrf_processor = HDRFProcessor(self)
+
+        if hdrf_processor.requires_hdrf():
+            print(
+                "\n🔬 HDRF measurements detected - initiating dual simulation workflow"
+            )
+            return self._run_hdrf_workflow(
+                scene_description, scene_dir, output_dir, hdrf_processor, **kwargs
+            )
+        else:
+            print("\nRunning standard simulation...")
+            return self._run_standard_simulation(
+                scene_description, scene_dir, output_dir, **kwargs
+            )
+
+    def _run_standard_simulation(
+        self,
+        scene_description: SceneDescription,
+        scene_dir: UPath,
+        output_dir: UPath,
+        **kwargs,
+    ) -> xr.Dataset:
+        """Run standard single simulation (non-HDRF).
+
+        This is the original simulation workflow for BRF, radiance, etc.
+
+        Args:
+            scene_description: Scene description
+            scene_dir: Scene directory
+            output_dir: Output directory
+            **kwargs: Additional options
+
+        Returns:
+            Simulation results
+        """
         experiment = self._create_experiment(scene_description, scene_dir)
+
         print("Executing Eradiate simulation...")
         num_measures = len(experiment.measures)
         print(f"Running {num_measures} measures separately...")
@@ -259,6 +312,140 @@ class EradiateBackend(SimulationBackend):
             )
 
         return self._process_results(experiment, output_dir)
+
+    def _run_hdrf_workflow(
+        self,
+        scene_description: SceneDescription,
+        scene_dir: UPath,
+        output_dir: UPath,
+        hdrf_processor: HDRFProcessor,
+        **kwargs,
+    ) -> xr.Dataset:
+        """Run HDRF dual simulation workflow.
+
+        Executes:
+        1. Actual surface simulation
+        2. White reference simulation
+        3. HDRF computation (L_actual / L_reference)
+        4. Result merging and saving
+
+        Args:
+            scene_description: Scene description
+            scene_dir: Scene directory
+            output_dir: Output directory
+            hdrf_processor: HDRFProcessor instance
+            **kwargs: Additional options
+
+        Returns:
+            Combined results including HDRF datasets
+        """
+        # Execute dual simulations
+        actual_results, reference_results = hdrf_processor.execute_dual_simulation(
+            scene_description, scene_dir, output_dir
+        )
+
+        # Compute HDRF from results
+        hdrf_results = hdrf_processor.compute_hdrf(actual_results, reference_results)
+
+        # Save HDRF results
+        hdrf_processor.save_hdrf_results(hdrf_results, output_dir)
+
+        # Merge HDRF results with actual results for unified return
+        # Convert to dict if results is xr.Dataset
+        if isinstance(actual_results, xr.Dataset):
+            actual_results_dict = {"results": actual_results}
+        else:
+            actual_results_dict = actual_results
+
+        all_results = {**actual_results_dict, **hdrf_results}
+
+        # Create visualizations if requested
+        plot_image = kwargs.get("plot_image", False)
+        if plot_image:
+            self._create_hdrf_visualizations(hdrf_results, output_dir)
+
+        print("\n" + "=" * 70)
+        print("✓ HDRF workflow complete")
+        print(f"  Actual surface results: {len(actual_results_dict)} measures")
+        print(f"  HDRF results: {len(hdrf_results)} measures")
+        print(f"  Output directory: {output_dir}")
+        print("=" * 70 + "\n")
+
+        return all_results
+
+    def _create_hdrf_visualizations(
+        self, hdrf_results: Dict[str, xr.Dataset], output_dir: UPath
+    ) -> None:
+        """Create visualizations for HDRF results.
+
+        Args:
+            hdrf_results: Dictionary of HDRF datasets
+            output_dir: Output directory
+        """
+        import matplotlib.pyplot as plt
+
+        vis_dir = output_dir / "hdrf_visualizations"
+        from s2gos_utils.io.paths import mkdir
+
+        mkdir(vis_dir)
+
+        for measure_id, dataset in hdrf_results.items():
+            try:
+                hdrf_data = dataset["hdrf"]
+
+                if "x_index" in hdrf_data.dims and "y_index" in hdrf_data.dims:
+                    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+                    if "w" in hdrf_data.dims and len(hdrf_data.w) > 1:
+                        img_data = hdrf_data.isel(w=0).values
+                    else:
+                        img_data = hdrf_data.squeeze().values
+
+                    im = axes[0].imshow(img_data, cmap="RdYlGn", vmin=0, vmax=1)
+                    axes[0].set_title(f"HDRF - {measure_id}")
+                    axes[0].set_xlabel("X index")
+                    axes[0].set_ylabel("Y index")
+                    plt.colorbar(im, ax=axes[0], label="HDRF")
+
+                    axes[1].hist(img_data.flatten(), bins=50, edgecolor="black")
+                    axes[1].set_xlabel("HDRF")
+                    axes[1].set_ylabel("Frequency")
+                    axes[1].set_title("HDRF Distribution")
+                    axes[1].axvline(
+                        x=img_data.mean(), color="r", linestyle="--", label="Mean"
+                    )
+                    axes[1].legend()
+
+                    plt.tight_layout()
+                    output_file = vis_dir / f"{measure_id}_hdrf_visualization.png"
+                    plt.savefig(output_file, dpi=150, bbox_inches="tight")
+                    plt.close()
+
+                    print(f"  Saved HDRF visualization: {output_file.name}")
+
+                elif "w" in hdrf_data.dims:
+                    fig, ax = plt.subplots(figsize=(10, 6))
+                    wavelengths = hdrf_data.w.values
+                    hdrf_values = hdrf_data.values
+
+                    ax.plot(wavelengths, hdrf_values, "b-", linewidth=2)
+                    ax.set_xlabel("Wavelength (nm)")
+                    ax.set_ylabel("HDRF")
+                    ax.set_title(f"Spectral HDRF - {measure_id}")
+                    ax.grid(True, alpha=0.3)
+                    ax.set_ylim([0, 1])
+
+                    plt.tight_layout()
+                    output_file = vis_dir / f"{measure_id}_hdrf_spectrum.png"
+                    plt.savefig(output_file, dpi=150, bbox_inches="tight")
+                    plt.close()
+
+                    print(f"  Saved HDRF spectrum: {output_file.name}")
+
+            except Exception as e:
+                print(
+                    f"  Warning: Could not create visualization for {measure_id}: {e}"
+                )
 
     def _process_object_materials(self, scene_description: SceneDescription) -> None:
         """Validate that all object materials use string references only.
@@ -554,6 +741,17 @@ class EradiateBackend(SimulationBackend):
                 elif obj_type == "vegetation_collection":
                     self._expand_vegetation_collection(obj, scene_dir, kdict)
                     continue
+                elif obj_type == "disk":
+                    center = obj["center"]
+                    radius = obj["radius"]
+                    material_ref = obj["material"]
+
+                    obj_dict = {
+                        "type": "disk",
+                        "to_world": mi.ScalarTransform4f.translate(center)
+                        @ mi.ScalarTransform4f.scale(radius),
+                        "bsdf": {"type": "ref", "id": f"_mat_{material_ref}"},
+                    }
 
                 else:
                     object_mesh_path = scene_dir / obj["mesh"]
@@ -599,7 +797,6 @@ class EradiateBackend(SimulationBackend):
 
                         to_world = to_world @ mi.ScalarTransform4f.scale(scale)
                         obj_dict["to_world"] = to_world
-
                 obj_id = obj.get("id") or obj.get("object_id", f"object_{len(kdict)}")
                 kdict[obj_id] = obj_dict
 
@@ -612,8 +809,6 @@ class EradiateBackend(SimulationBackend):
         geometry = self._create_geometry_from_atmosphere(scene_description)
 
         self._validate_material_ids(kdict, scene_description)
-
-        print(measures)
         return AtmosphereExperiment(
             geometry=geometry,
             atmosphere=atmosphere,
@@ -841,10 +1036,8 @@ class EradiateBackend(SimulationBackend):
                 measures.append(self._translate_ground_sensor(sensor))
             else:
                 raise ValueError(f"Unsupported sensor type: {type(sensor)}")
-
         for rad_quantity in self.simulation_config.radiative_quantities:
             measures.append(self._translate_radiative_quantity(rad_quantity))
-
         return measures
 
     def _translate_satellite_sensor(
@@ -975,31 +1168,98 @@ class EradiateBackend(SimulationBackend):
         return base_measure
 
     def _translate_radiative_quantity(self, rad_quantity) -> Dict[str, Any]:
-        """Translate radiative quantity configuration to placeholder measure.
+        """Translate radiative quantity configuration to Eradiate measure.
 
-        TODO: This is a placeholder implementation. Future versions will:
-        1. Determine appropriate sensors needed for the radiative quantity
-        2. Instantiate those sensors internally
-        3. Calculate the requested quantity from sensor results
+        Handles HDRF, BHR, and other radiative quantities by creating appropriate
+        Eradiate measures. For HDRF, creates BOA distant measure with ray offset.
+
+        Args:
+            rad_quantity: RadiativeQuantityConfig object
+
+        Returns:
+            Eradiate measure configuration dictionary
         """
+        if rad_quantity.quantity == MeasurementType.HDRF:
+            return self._create_hdrf_measure(rad_quantity)
+        elif rad_quantity.quantity == MeasurementType.BHR:
+            return self._create_bhr_measure(rad_quantity)
+        else:
+            # Placeholder for other quantities
+            quantity_id = f"{rad_quantity.quantity.value}_measure"
+            print(
+                f"TODO: {rad_quantity.quantity.value.upper()} calculation not yet implemented - generating placeholder"
+            )
+            return {
+                "id": quantity_id,
+                "type": "distant",
+                "construct": "from_angles",
+                "angles": [0.0, 0.0],
+                "spp": rad_quantity.samples_per_pixel,
+                "srf": self._translate_srf(rad_quantity.srf),
+            }
 
-        quantity_id = f"{rad_quantity.quantity.value}_measure"
+    def _create_hdrf_measure(self, rad_quantity) -> Dict[str, Any]:
+        """Create BOA distant measure for HDRF computation.
 
-        # Log TODO message for user clarity
-        print(
-            f"TODO: {rad_quantity.quantity.value.upper()} calculation not yet implemented - generating placeholder"
-        )
+        Args:
+            rad_quantity: RadiativeQuantityConfig with HDRF settings
 
-        base_config = {
-            "id": quantity_id,
-            "type": "distant",
-            "construct": "from_angles",
-            "angles": [0.0, 0.0],  # Nadir view as placeholder
-            "spp": rad_quantity.samples_per_pixel,
+        Returns:
+            Eradiate mdistant measure configuration
+        """
+        # Use stored ID if available, otherwise generate from angles
+        if rad_quantity.id:
+            measure_id = rad_quantity.id
+        else:
+            string_viewing_zenith = str(rad_quantity.viewing_zenith).replace(".", "_")
+            string_viewing_azimuth = str(rad_quantity.viewing_azimuth).replace(".", "_")
+            measure_id = f"hdrf_{string_viewing_zenith}__{string_viewing_azimuth}"
+
+        if (
+            hasattr(self, "reference_panel_coords")
+            and self.reference_panel_coords is not None
+        ):
+            target_xyz = list(self.reference_panel_coords)
+            logging.info(
+                f"Using reference panel coordinates for HDRF measure: {target_xyz}"
+            )
+        else:
+            target_xyz = [0, 0, 1]
+            logging.warning(
+                "No reference panel coordinates found, using default [0, 0, 1]"
+            )
+
+        measure_config = {
+            "type": "hdistant",
+            "id": measure_id,
             "srf": self._translate_srf(rad_quantity.srf),
+            "target": target_xyz,
+            "ray_offset": HDRF_RAY_OFFSET,
+            "spp": rad_quantity.samples_per_pixel,
         }
 
-        return base_config
+        return measure_config
+
+    def _create_bhr_measure(self, rad_quantity) -> Dict[str, Any]:
+        """Create hemispherical measure for BHR computation.
+
+        Args:
+            rad_quantity: RadiativeQuantityConfig with BHR settings
+
+        Returns:
+            Eradiate measure configuration
+        """
+        measure_id = "bhr_measure"
+
+        measure_config = {
+            "type": "hdistant",
+            "id": measure_id,
+            "srf": self._translate_srf(rad_quantity.srf),
+            "spp": rad_quantity.samples_per_pixel,
+            "direction": [0, 0, -1],
+        }
+
+        return measure_config
 
     def _translate_srf(self, srf) -> Union[Dict[str, Any], str]:
         """Translate generic SRF to Eradiate format."""
@@ -1418,13 +1678,14 @@ class EradiateBackend(SimulationBackend):
             print(f"Results saved to {single_output}")
 
         # Generate dummy results for radiative quantities (TODO placeholders)
-        for rad_quantity in self.simulation_config.radiative_quantities:
-            dummy_output = self._create_dummy_radiative_quantity_result(
-                rad_quantity, output_dir, metadata
-            )
-            print(
-                f"TODO: {rad_quantity.quantity.value.upper()} placeholder saved to {dummy_output}"
-            )
+        print(self.simulation_config.radiative_quantities)
+        # for rad_quantity in self.simulation_config.radiative_quantities:
+        #     dummy_output = self._create_dummy_radiative_quantity_result(
+        #         rad_quantity, output_dir, metadata
+        #     )
+        #     print(
+        #         f"TODO: {rad_quantity.quantity.value.upper()} placeholder saved to {dummy_output}"
+        #     )
 
         return results
 

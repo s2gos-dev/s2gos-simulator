@@ -21,6 +21,7 @@ from .config import (
     UAVInstrumentType,
     UAVSensor,
 )
+from .hdrf_processor import HDRFProcessor
 
 __version__ = "0.1.0"
 
@@ -41,8 +42,8 @@ __all__ = [
     "MeasurementType",
     "UAVInstrumentType",
     "GroundInstrumentType",
-    # Backends
     "EradiateSimulator",
     "EradiateBackend",
     "ERADIATE_AVAILABLE",
+    "HDRFProcessor",
 ]
