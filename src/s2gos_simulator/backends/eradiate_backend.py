@@ -1,9 +1,11 @@
 import logging
 from typing import Any, Dict, List, Optional, Union
+import wave
 
 import numpy as np
 import xarray as xr
 from PIL import Image
+from scipy.interpolate import RegularGridInterpolator
 
 # Import coordinate transformation system
 from s2gos_utils.coordinates import CoordinateSystem
@@ -56,6 +58,24 @@ except ImportError:
 HDRF_RAY_OFFSET = 0.1
 
 
+def sanitize_sensor_id(sensor_id: str) -> str:
+    """Sanitize sensor ID for Eradiate kernel compatibility.
+
+    Replaces dots with underscores to prevent Eradiate from interpreting
+    them as nested dictionary path separators.
+
+    Example:
+        'hypstar_wl500.3nm' → 'hypstar_wl500_3nm'
+
+    Args:
+        sensor_id: Original sensor ID
+
+    Returns:
+        Sanitized sensor ID safe for Eradiate kernel
+    """
+    return sensor_id.replace(".", "_") if sensor_id else sensor_id
+
+
 class EradiateBackend(SimulationBackend):
     """
     Enhanced Eradiate backend for the new configuration system.
@@ -67,7 +87,6 @@ class EradiateBackend(SimulationBackend):
 
         eradiate_hints = simulation_config.backend_hints.get("eradiate", {})
         self._eradiate_mode = eradiate_hints.get("mode", "mono")
-        self._absorption_dataset = eradiate_hints.get("absorption_dataset")
 
         if ERADIATE_AVAILABLE:
             try:
@@ -261,7 +280,7 @@ class EradiateBackend(SimulationBackend):
 
         if hdrf_processor.requires_hdrf():
             print(
-                "\n🔬 HDRF measurements detected - initiating dual simulation workflow"
+                "\nHDRF measurements detected - initiating dual simulation workflow"
             )
             return self._run_hdrf_workflow(
                 scene_description, scene_dir, output_dir, hdrf_processor, **kwargs
@@ -271,6 +290,50 @@ class EradiateBackend(SimulationBackend):
             return self._run_standard_simulation(
                 scene_description, scene_dir, output_dir, **kwargs
             )
+
+    def _query_terrain_elevation(
+        self, scene_description: SceneDescription, scene_dir: UPath, x: float, y: float
+    ) -> float:
+        """Query terrain elevation at scene coordinates (x, y) in meters.
+
+        Args:
+            scene_description: Scene description containing metadata
+            scene_dir: Scene directory containing DEM data
+            x: Scene x-coordinate in meters
+            y: Scene y-coordinate in meters
+
+        Returns:
+            Elevation in meters at (x, y)
+        """
+        # Find DEM file
+        scene_name = scene_description.name
+        resolution_m = scene_description.resolution_m
+
+        dem_path = scene_dir / "data" / f"dem_{scene_name}_{resolution_m}m.zarr"
+        if not dem_path.exists():
+            dem_path = scene_dir / "data" / f"dem_{scene_name}.zarr"
+
+        if not dem_path.exists():
+            raise FileNotFoundError(
+                f"DEM file not found in {scene_dir / 'data'}. "
+                f"Cannot query terrain elevation for terrain-relative sensor heights."
+            )
+
+        # Query elevation using linear interpolation
+        with xr.open_zarr(dem_path) as dem_ds:
+            dem_data = dem_ds["elevation"]
+
+            interpolator = RegularGridInterpolator(
+                (dem_data.y.values, dem_data.x.values),
+                dem_data.values,
+                method="linear",
+                bounds_error=False,
+                fill_value=0.0,
+            )
+
+            elevation = float(interpolator([(y, x)])[0])
+
+        return elevation
 
     def _run_standard_simulation(
         self,
@@ -303,6 +366,17 @@ class EradiateBackend(SimulationBackend):
                 experiment.measures[i_measure], "id", f"measure_{i_measure}"
             )
             print(f"Executing measure {i_measure + 1}/{num_measures}: {measure_id}")
+
+            # Debug logging for spectral configuration
+            measure = experiment.measures[i_measure]
+            logging.info(f"Measure type: {type(measure).__name__}")
+            logging.info(f"Measure SRF type: {type(measure.srf)}")
+            try:
+                spectral_count = len(list(experiment.spectral_indices(i_measure)))
+                logging.info(f"Spectral indices count: {spectral_count}")
+            except Exception as e:
+                logging.error(f"Error getting spectral indices: {e}")
+
             eradiate.run(experiment, measures=i_measure)
 
         plot_image = kwargs.get("plot_image", False)
@@ -547,6 +621,10 @@ class EradiateBackend(SimulationBackend):
 
     def _create_experiment(self, scene_description: SceneDescription, scene_dir: UPath):
         """Create Eradiate experiment from scene description."""
+        # Store scene_dir and scene_description for use in sensor translation
+        self._current_scene_dir = scene_dir
+        self._current_scene_description = scene_description
+
         kdict = {}
         kpmap = {}
         adapter = EradiateMaterialAdapter()
@@ -621,8 +699,18 @@ class EradiateBackend(SimulationBackend):
             kpmap.update(mat_kpmap)
 
         if hamster_data_dict is not None:
+            # Get region material names (indices 11+) - these should NOT use HAMSTER
+            region_material_names = {
+                mat_name for idx, mat_name in scene_description.material_indices.items()
+                if int(idx) >= 11
+            }
+
             for surface_name, hamster_data in hamster_data_dict.items():
                 for mat_name in scene_description.materials.keys():
+                    # Skip region materials - they should use their specified spectrum
+                    if mat_name in region_material_names:
+                        continue
+
                     hamster_material_id = f"_mat_{mat_name}_{surface_name}"
 
                     hamster_kdict = adapter.create_hamster_kdict(
@@ -640,6 +728,7 @@ class EradiateBackend(SimulationBackend):
         background = scene_description.background
 
         hamster_available = hamster_data_dict is not None
+        print(self._create_target_surface(scene_description, scene_dir, hamster_available))
         kdict.update(
             self._create_target_surface(scene_description, scene_dir, hamster_available)
         )
@@ -767,7 +856,7 @@ class EradiateBackend(SimulationBackend):
                     if "material" in obj:
                         material = obj["material"]
                         if isinstance(material, str):
-                            obj_dict["bsdf"] = {"type": "ref", "id": material}
+                            obj_dict["bsdf"] = {"type": "ref", "id": f"_mat_{material}"}
                         else:
                             obj_dict["bsdf"] = {
                                 "type": "diffuse",
@@ -859,14 +948,15 @@ class EradiateBackend(SimulationBackend):
             (altitude_max - altitude_min) / mol_dict.get("altitude_step", 1000)
         ) + 1
 
+        # Read absorption database from scene config, fallback to Eradiate default
+        absorption_data = mol_dict.get("absorption_database") or AbsorptionDatabase.default()
+
         atmosphere = MolecularAtmosphere(
             thermoprops={
                 "identifier": thermoprops_id,
                 "z": np.linspace(altitude_min, altitude_max, int(num_steps)) * ureg.m,
             },
-            absorption_data=self._absorption_dataset
-            if self._absorption_dataset is not None
-            else AbsorptionDatabase.default(),
+            absorption_data=absorption_data,
             has_absorption=mol_dict.get("has_absorption", True),
             has_scattering=mol_dict.get("has_scattering", True),
         )
@@ -1015,7 +1105,8 @@ class EradiateBackend(SimulationBackend):
         )
 
         origin_vec = np.array(view.origin)
-        target_vec = origin_vec + direction
+        # Use a farther target distance (1000m) for radiancemeters to ensure proper ray intersection
+        target_vec = origin_vec + direction * 1000.0
 
         return target_vec.tolist(), direction.tolist()
 
@@ -1033,7 +1124,14 @@ class EradiateBackend(SimulationBackend):
             elif isinstance(sensor, UAVSensor):
                 measures.append(self._translate_uav_sensor(sensor))
             elif isinstance(sensor, GroundSensor):
-                measures.append(self._translate_ground_sensor(sensor))
+                # Pass stored scene_dir and scene_description for terrain elevation queries
+                measures.append(
+                    self._translate_ground_sensor(
+                        sensor,
+                        self._current_scene_description,
+                        self._current_scene_dir,
+                    )
+                )
             else:
                 raise ValueError(f"Unsupported sensor type: {type(sensor)}")
         for rad_quantity in self.simulation_config.radiative_quantities:
@@ -1069,7 +1167,7 @@ class EradiateBackend(SimulationBackend):
             "type": "mpdistant",
             "construct": "from_angles",
             "angles": [sensor.viewing.zenith, sensor.viewing.azimuth],
-            "id": sensor.id,
+            "id": sanitize_sensor_id(sensor.id),
             "film_resolution": sensor.film_resolution,
             "target": {
                 "type": "rectangle",
@@ -1089,7 +1187,7 @@ class EradiateBackend(SimulationBackend):
         view = sensor.viewing
 
         base_config = {
-            "id": sensor.id,
+            "id": sanitize_sensor_id(sensor.id),
             "spp": sensor.samples_per_pixel,
             "srf": self._translate_srf(sensor.srf),
             "origin": view.origin,
@@ -1122,12 +1220,20 @@ class EradiateBackend(SimulationBackend):
 
         return base_config
 
-    def _translate_ground_sensor(self, sensor: GroundSensor) -> Dict[str, Any]:
-        """Translate ground sensor to Eradiate measure."""
+    def _translate_ground_sensor(
+        self,
+        sensor: GroundSensor,
+        scene_description: SceneDescription,
+        scene_dir: UPath,
+    ) -> Dict[str, Any]:
+        """Translate ground sensor to Eradiate measure.
+
+        Handles terrain-relative height positioning if enabled on sensor.
+        """
         view = sensor.viewing
 
         base_measure = {
-            "id": sensor.id,
+            "id": sanitize_sensor_id(sensor.id),
             "spp": sensor.samples_per_pixel,
             "srf": self._translate_srf(sensor.srf),
         }
@@ -1137,7 +1243,23 @@ class EradiateBackend(SimulationBackend):
             base_measure["direction"] = [0, 0, 1] if view.upward_looking else [0, 0, -1]
 
         elif isinstance(view, (LookAtViewing, AngularFromOriginViewing)):
-            base_measure["origin"] = view.origin
+            # Handle terrain-relative height if enabled
+            origin = list(view.origin)  # Make a copy to avoid modifying original
+
+            if sensor.terrain_relative_height:
+                x, y, z_offset = origin
+                terrain_elevation = self._query_terrain_elevation(
+                    scene_description, scene_dir, x, y
+                )
+                absolute_z = terrain_elevation + z_offset
+                origin[2] = absolute_z
+
+                logging.debug(
+                    f"Sensor {sensor.id}: terrain={terrain_elevation:.2f}m, "
+                    f"offset={z_offset:.2f}m, final_z={absolute_z:.2f}m"
+                )
+
+            base_measure["origin"] = origin
 
             if sensor.instrument in [
                 GroundInstrumentType.PERSPECTIVE_CAMERA,
@@ -1164,6 +1286,9 @@ class EradiateBackend(SimulationBackend):
             raise ValueError(
                 f"Unsupported viewing type for ground sensor: {type(view)}"
             )
+        # print("!!!!!!!!!!!")
+        # print(len(base_measure["srf"]["wavelengths"]))
+        # print(len(base_measure["srf"]["values"]))
 
         return base_measure
 
@@ -1209,7 +1334,7 @@ class EradiateBackend(SimulationBackend):
         """
         # Use stored ID if available, otherwise generate from angles
         if rad_quantity.id:
-            measure_id = rad_quantity.id
+            measure_id = sanitize_sensor_id(rad_quantity.id)
         else:
             string_viewing_zenith = str(rad_quantity.viewing_zenith).replace(".", "_")
             string_viewing_azimuth = str(rad_quantity.viewing_azimuth).replace(".", "_")
@@ -1282,6 +1407,29 @@ class EradiateBackend(SimulationBackend):
                 }
             elif srf.type == "dataset":
                 return srf.dataset_id
+            elif srf.type == "gaussian":
+                # Approximate Gaussian SRF as uniform SRF over FWHM range
+                # HYPSTAR requirements: FWHM = 3nm (<1000nm) or 10nm (≥1000nm)
+                #
+                # Note: Narrow-band Gaussian SRFs have compatibility issues with Eradiate's
+                # spectral grid selection, even in CKD mode. The working approach (from
+                # Eradiate's hyperspectral_timeseries.ipynb example) uses broad uniform SRFs
+                # during simulation and applies narrow Gaussian SRFs in post-processing.
+                #
+                # This uniform approximation captures the spectral width while ensuring
+                # reliable simulation. For future enhancement, implement two-stage workflow:
+                # 1. Simulate with broad uniform SRF (400-2400 nm)
+                # 2. Apply narrow Gaussian SRFs via apply_spectral_response() post-processing
+                wl_center = srf.wavelengths[0]  # Single center wavelength
+                fwhm = srf.fwhm
+                half_width = fwhm / 2.0
+
+                return {
+                    "type": "uniform",
+                    "wmin": wl_center - half_width,
+                    "wmax": wl_center + half_width,
+                    "value": 1.0
+                }
             elif srf.type == "custom":
                 if srf.data and "wavelengths" in srf.data and "values" in srf.data:
                     return {
@@ -1348,10 +1496,19 @@ class EradiateBackend(SimulationBackend):
         selection_texture_data = np.array(texture_image)
         selection_texture_data = np.atleast_3d(selection_texture_data)
 
+        # Material region overrides are now applied by the generator during texture creation
+        # No need to modify texture here - it's already been modified
+
+        material_indices = scene_description.material_indices
         material_ids = self._get_material_ids_from_scene(scene_description)
 
         if hamster_available:
-            material_ids = [f"{mat_id}_target" for mat_id in material_ids]
+            # Only apply HAMSTER suffix to base landcover materials (indices 0-10)
+            # Region materials (indices 11+) keep their original names
+            material_ids = [
+                f"{mat_id}_target" if int(idx) < 11 else mat_id
+                for idx, mat_id in zip(sorted(material_indices.keys(), key=int), material_ids)
+            ]
 
         return {
             "terrain_material": {
@@ -1399,10 +1556,19 @@ class EradiateBackend(SimulationBackend):
         buffer_selection_texture_data = np.array(buffer_texture_image)
         buffer_selection_texture_data = np.atleast_3d(buffer_selection_texture_data)
 
+        # Material region overrides are now applied by the generator during texture creation
+        # No need to modify texture here - it's already been modified
+
+        material_indices = scene_description.material_indices
         material_ids = self._get_material_ids_from_scene(scene_description)
 
         if hamster_available:
-            material_ids = [f"{mat_id}_buffer" for mat_id in material_ids]
+            # Only apply HAMSTER suffix to base landcover materials (indices 0-10)
+            # Region materials (indices 11+) keep their original names
+            material_ids = [
+                f"{mat_id}_buffer" if int(idx) < 11 else mat_id
+                for idx, mat_id in zip(sorted(material_indices.keys(), key=int), material_ids)
+            ]
 
         result = {
             "buffer_material": {
@@ -1477,10 +1643,19 @@ class EradiateBackend(SimulationBackend):
             background_selection_texture_data
         )
 
+        # Material region overrides are now applied by the generator during texture creation
+        # No need to modify texture here - it's already been modified
+
+        material_indices = scene_description.material_indices
         material_ids = self._get_material_ids_from_scene(scene_description)
 
         if hamster_available:
-            material_ids = [f"{mat_id}_background" for mat_id in material_ids]
+            # Only apply HAMSTER suffix to base landcover materials (indices 0-10)
+            # Region materials (indices 11+) keep their original names
+            material_ids = [
+                f"{mat_id}_background" if int(idx) < 11 else mat_id
+                for idx, mat_id in zip(sorted(material_indices.keys(), key=int), material_ids)
+            ]
 
         result = {
             "background_material": {

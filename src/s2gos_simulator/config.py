@@ -160,7 +160,8 @@ class SpectralResponse(BaseModel):
 
     type: Literal["delta", "uniform", "dataset"] = "delta"
     wavelengths: Optional[List[float]] = Field(
-        None, description="Wavelengths in nm for delta SRF"
+        None,
+        description="Wavelengths in nm for delta SRF or center wavelength for gaussian SRF",
     )
     wmin: Optional[float] = Field(
         None, description="Minimum wavelength for uniform SRF"
@@ -613,6 +614,11 @@ class GroundSensor(BaseSensor):
     platform_type: Literal[PlatformType.GROUND] = PlatformType.GROUND
     instrument: GroundInstrumentType
     viewing: Union[LookAtViewing, AngularFromOriginViewing]
+    terrain_relative_height: bool = Field(
+        False,
+        description="If True, z-coordinate in origin is offset from terrain elevation. "
+        "If False (default), z-coordinate is absolute elevation.",
+    )
 
     @model_validator(mode="after")
     def set_defaults_and_validate(self):
@@ -798,7 +804,11 @@ class SimulationConfig(BaseModel):
 
     backend_hints: Dict[str, Any] = Field(
         default_factory=dict,
-        description="Backend-specific configuration hints (e.g., {'eradiate': {'mode': 'ckd_double'}})",
+        description="""Backend-specific configuration hints (e.g., {'eradiate': {'mode': 'ckd_double'}}).
+
+        For Eradiate backend:
+        - 'mode': Spectral mode ('mono', 'ckd', 'mono_polarized', 'ckd_polarized', etc.)
+        """,
     )
 
     model_config = {
