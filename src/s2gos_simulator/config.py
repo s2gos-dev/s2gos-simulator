@@ -144,7 +144,8 @@ class MeasurementType(str, Enum):
     BHR_ISO = "bhr_iso"  # Bi-Hemispherical Reflectance (isotropic)
     FLUX_3D = "flux_3d"  # 3D flux distributions
     RADIANCE = "radiance"  # Spectral radiance (instrument-specific)
-    IRRADIANCE = "irradiance"  # Spectral irradiance
+    IRRADIANCE = "irradiance"  # Spectral irradiance (generic)
+    BOA_IRRADIANCE = "boa_irradiance"  # Bottom-of-Atmosphere downward irradiance
     DIGITAL_HEMISPHERICAL_PHOTOGRAPHY = "dhp"  # Digital Hemispherical Photography
     FAPAR = "fapar"  # Fraction of Absorbed Photosynthetically Active Radiation
 
@@ -440,6 +441,82 @@ class RadiativeQuantityConfig(BaseModel):
                 )
             if self.target_lat is None or self.target_lon is None:
                 raise ValueError("HDRF measurements require target_lat and target_lon")
+
+        return self
+
+
+class IrradianceMeasurementConfig(BaseModel):
+    """Configuration for BOA irradiance measurements at specific locations.
+
+    Uses the white reference disk technique to measure downward irradiance at BOA:
+    - Places a small white Lambertian disk (ρ=1.0) at the measurement location
+    - Measures radiance from the disk
+    - Converts to irradiance: E = π × L
+    - Averages multiple samples to reduce Monte Carlo noise
+
+    This is the same technique used for HDRF reference measurements, now
+    available as a standalone measurement for any location.
+    """
+
+    id: str = Field(
+        ..., description="Unique identifier for this irradiance measurement"
+    )
+    target_lat: float = Field(
+        ..., description="Target latitude for irradiance measurement (WGS84 decimal degrees)"
+    )
+    target_lon: float = Field(
+        ..., description="Target longitude for irradiance measurement (WGS84 decimal degrees)"
+    )
+    height_offset_m: float = Field(
+        0.0,
+        ge=0.0,
+        description="Height above terrain for measurement (accounts for vegetation/sensor height)",
+    )
+    srf: Optional[SRFType] = Field(
+        None, description="Spectral response function for irradiance measurement"
+    )
+    samples_per_pixel: int = Field(
+        512,
+        ge=1,
+        description="Number of samples per pixel for Monte Carlo calculations (higher = less noise)",
+    )
+
+    @model_validator(mode="after")
+    def validate_irradiance_config(self):
+        """Validate irradiance measurement configuration."""
+        import logging
+        logger = logging.getLogger(__name__)
+
+        # Validate lat/lon ranges
+        if not -90 <= self.target_lat <= 90:
+            raise ValueError(
+                f"target_lat must be in range [-90, 90], got {self.target_lat}"
+            )
+        if not -180 <= self.target_lon <= 180:
+            raise ValueError(
+                f"target_lon must be in range [-180, 180], got {self.target_lon}"
+            )
+
+        # Validate height offset
+        if self.height_offset_m < 0:
+            raise ValueError(
+                f"height_offset_m must be >= 0, got {self.height_offset_m}. "
+                "Negative heights (underground) are not physical."
+            )
+
+        # Warning for large height offsets
+        if self.height_offset_m > 100:
+            logger.warning(
+                f"Large height_offset_m ({self.height_offset_m}m) detected for '{self.id}'. "
+                "Ensure this is intentional - typical ground sensors are <50m."
+            )
+
+        # Validate samples_per_pixel
+        if self.samples_per_pixel < 32:
+            logger.warning(
+                f"Low samples_per_pixel ({self.samples_per_pixel}) for '{self.id}'. "
+                "Recommend >= 128 for acceptable noise levels, >= 512 for low noise."
+            )
 
         return self
 
@@ -795,6 +872,10 @@ class SimulationConfig(BaseModel):
         default_factory=list,
         description="List of radiative quantities to calculate independently",
     )
+    irradiance_measurements: List[IrradianceMeasurementConfig] = Field(
+        default_factory=list,
+        description="List of BOA irradiance measurements at specific locations",
+    )
 
     # Processing configuration
     processing: ProcessingConfig = Field(
@@ -832,10 +913,9 @@ class SimulationConfig(BaseModel):
     @model_validator(mode="after")
     def validate_simulation_config(self):
         """Validate simulation configuration."""
-        # Must have at least one sensor or radiative quantity
-        if not self.sensors and not self.radiative_quantities:
+        if not self.sensors and not self.radiative_quantities and not self.irradiance_measurements:
             raise ValueError(
-                "At least one sensor or radiative quantity must be specified"
+                "At least one sensor, radiative quantity, or irradiance measurement must be specified"
             )
 
         return self

@@ -712,7 +712,7 @@ class EradiateMaterialAdapter:
             texture_id: {
                 "type": "bitmap",
                 "id": texture_id,
-                "filter_type": "nearest",
+                "filter_type": "bilinear",
                 "wrap_mode": "clamp",
                 "data": texture_data,
                 "raw": True,
