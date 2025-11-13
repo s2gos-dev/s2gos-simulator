@@ -1154,7 +1154,13 @@ class EradiateBackend(SimulationBackend):
                     self._translate_satellite_sensor(sensor, scene_description)
                 )
             elif isinstance(sensor, UAVSensor):
-                measures.append(self._translate_uav_sensor(sensor))
+                measures.append(
+                    self._translate_uav_sensor(
+                        sensor,
+                        self._current_scene_description,
+                        self._current_scene_dir,
+                    )
+                )
             elif isinstance(sensor, GroundSensor):
                 # Pass stored scene_dir and scene_description for terrain elevation queries
                 measures.append(
@@ -1219,15 +1225,39 @@ class EradiateBackend(SimulationBackend):
 
         return measure_config
 
-    def _translate_uav_sensor(self, sensor: UAVSensor) -> Dict[str, Any]:
-        """Translate UAV sensor to Eradiate measure."""
+    def _translate_uav_sensor(
+        self,
+        sensor: UAVSensor,
+        scene_description: SceneDescription,
+        scene_dir: UPath,
+    ) -> Dict[str, Any]:
+        """Translate UAV sensor to Eradiate measure.
+
+        Handles terrain-relative height positioning if enabled on sensor.
+        """
         view = sensor.viewing
+
+        # Handle terrain-relative height if enabled
+        origin = list(view.origin)  # Make a copy to avoid modifying original
+
+        if sensor.terrain_relative_height:
+            x, y, z_offset = origin
+            terrain_elevation = self._query_terrain_elevation(
+                scene_description, scene_dir, x, y
+            )
+            absolute_z = terrain_elevation + z_offset
+            origin[2] = absolute_z
+
+            logging.debug(
+                f"Sensor {sensor.id}: terrain={terrain_elevation:.2f}m, "
+                f"offset={z_offset:.2f}m, final_z={absolute_z:.2f}m"
+            )
 
         base_config = {
             "id": sanitize_sensor_id(sensor.id),
             "spp": sensor.samples_per_pixel,
             "srf": self._translate_srf(sensor.srf),
-            "origin": view.origin,
+            "origin": origin,
         }
 
         if sensor.instrument == UAVInstrumentType.PERSPECTIVE_CAMERA:

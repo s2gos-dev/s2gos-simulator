@@ -660,6 +660,11 @@ class UAVSensor(BaseSensor):
     viewing: Union[LookAtViewing, AngularFromOriginViewing]
     fov: Optional[float] = Field(None)
     resolution: Optional[List[int]] = Field(None)
+    terrain_relative_height: bool = Field(
+        False,
+        description="If True, z-coordinate in origin is offset from terrain elevation. "
+        "If False (default), z-coordinate is absolute elevation.",
+    )
 
     @model_validator(mode="after")
     def validate_and_set_defaults(self):
