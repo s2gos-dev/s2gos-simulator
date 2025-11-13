@@ -1,11 +1,10 @@
 import logging
 from typing import Any, Dict, List, Optional, Union
 import wave
-
+import json
 import numpy as np
 import xarray as xr
 from PIL import Image
-from scipy.interpolate import RegularGridInterpolator
 
 # Import coordinate transformation system
 from s2gos_utils.coordinates import CoordinateSystem
@@ -22,6 +21,7 @@ from ..config import (
     GroundInstrumentType,
     GroundSensor,
     HemisphericalViewing,
+    IrradianceMeasurementConfig,
     LookAtViewing,
     MeasurementType,
     PlatformType,
@@ -33,6 +33,7 @@ from ..config import (
     UAVSensor,
 )
 from ..hdrf_processor import HDRFProcessor
+from ..irradiance_processor import IrradianceProcessor
 
 try:
     import eradiate
@@ -138,6 +139,7 @@ class EradiateBackend(SimulationBackend):
             "fapar",
             "flux_3d",
             "irradiance",
+            "boa_irradiance",
             "dhp",
         ]
 
@@ -267,26 +269,34 @@ class EradiateBackend(SimulationBackend):
 
         mkdir(output_dir)
 
-        print(f"Running Eradiate simulation: {self.simulation_config.name}")
-        print(f"Sensors: {len(self.simulation_config.sensors)}")
-        print(
-            f"Radiative quantities: {len(self.simulation_config.radiative_quantities)}"
-        )
-        print(
-            f"Measurement types: {[mt.value for mt in self.simulation_config.output_quantities]}"
-        )
+        print(f"Eradiate simulation: {self.simulation_config.name}")
+        print(f"  Sensors: {len(self.simulation_config.sensors)}")
+        print(f"  Radiative quantities: {len(self.simulation_config.radiative_quantities)}")
+        print(f"  Irradiance measurements: {len(self.simulation_config.irradiance_measurements)}\n")
 
-        hdrf_processor = HDRFProcessor(self)
+        hdrf_proc = HDRFProcessor(self)
+        irr_proc = IrradianceProcessor(self)
+        requires_hdrf = hdrf_proc.requires_hdrf()
+        requires_irr = irr_proc.requires_irradiance()
 
-        if hdrf_processor.requires_hdrf():
-            print(
-                "\nHDRF measurements detected - initiating dual simulation workflow"
+        # Route to appropriate workflow
+        if requires_hdrf and requires_irr:
+            print("Workflow: HDRF + Irradiance (combined)")
+            return self._run_combined_workflow(
+                scene_description, scene_dir, output_dir, hdrf_proc, irr_proc, **kwargs
             )
+        elif requires_hdrf:
+            print("Workflow: HDRF (dual simulation)")
             return self._run_hdrf_workflow(
-                scene_description, scene_dir, output_dir, hdrf_processor, **kwargs
+                scene_description, scene_dir, output_dir, hdrf_proc, **kwargs
+            )
+        elif requires_irr:
+            print("Workflow: BOA Irradiance")
+            return self._run_irradiance_workflow(
+                scene_description, scene_dir, output_dir, irr_proc, **kwargs
             )
         else:
-            print("\nRunning standard simulation...")
+            print("Workflow: Standard")
             return self._run_standard_simulation(
                 scene_description, scene_dir, output_dir, **kwargs
             )
@@ -304,83 +314,37 @@ class EradiateBackend(SimulationBackend):
 
         Returns:
             Elevation in meters at (x, y)
+
+        Raises:
+            FileNotFoundError: If DEM file not found
         """
-        # Find DEM file
-        scene_name = scene_description.name
-        resolution_m = scene_description.resolution_m
+        from s2gos_simulator.terrain_query import TerrainQuery
 
-        dem_path = scene_dir / "data" / f"dem_{scene_name}_{resolution_m}m.zarr"
-        if not dem_path.exists():
-            dem_path = scene_dir / "data" / f"dem_{scene_name}.zarr"
-
-        if not dem_path.exists():
-            raise FileNotFoundError(
-                f"DEM file not found in {scene_dir / 'data'}. "
-                f"Cannot query terrain elevation for terrain-relative sensor heights."
-            )
-
-        # Query elevation using linear interpolation
-        with xr.open_zarr(dem_path) as dem_ds:
-            dem_data = dem_ds["elevation"]
-
-            interpolator = RegularGridInterpolator(
-                (dem_data.y.values, dem_data.x.values),
-                dem_data.values,
-                method="linear",
-                bounds_error=False,
-                fill_value=0.0,
-            )
-
-            elevation = float(interpolator([(y, x)])[0])
-
-        return elevation
+        terrain_query = TerrainQuery(scene_description, scene_dir)
+        return terrain_query.query_elevation_at_scene_coords(
+            x, y, raise_on_error=True
+        )
 
     def _run_standard_simulation(
         self,
         scene_description: SceneDescription,
         scene_dir: UPath,
         output_dir: UPath,
+        include_irradiance_measures: bool = True,
         **kwargs,
     ) -> xr.Dataset:
-        """Run standard single simulation (non-HDRF).
+        """Run standard simulation (BRF, radiance, etc.)."""
+        experiment = self._create_experiment(
+            scene_description, scene_dir, include_irradiance_measures
+        )
 
-        This is the original simulation workflow for BRF, radiance, etc.
+        # Run all measures
+        for i in range(len(experiment.measures)):
+            measure_id = getattr(experiment.measures[i], "id", f"measure_{i}")
+            print(f"  Measure {i + 1}/{len(experiment.measures)}: {measure_id}")
+            eradiate.run(experiment, measures=i)
 
-        Args:
-            scene_description: Scene description
-            scene_dir: Scene directory
-            output_dir: Output directory
-            **kwargs: Additional options
-
-        Returns:
-            Simulation results
-        """
-        experiment = self._create_experiment(scene_description, scene_dir)
-
-        print("Executing Eradiate simulation...")
-        num_measures = len(experiment.measures)
-        print(f"Running {num_measures} measures separately...")
-
-        for i_measure in range(num_measures):
-            measure_id = getattr(
-                experiment.measures[i_measure], "id", f"measure_{i_measure}"
-            )
-            print(f"Executing measure {i_measure + 1}/{num_measures}: {measure_id}")
-
-            # Debug logging for spectral configuration
-            measure = experiment.measures[i_measure]
-            logging.info(f"Measure type: {type(measure).__name__}")
-            logging.info(f"Measure SRF type: {type(measure.srf)}")
-            try:
-                spectral_count = len(list(experiment.spectral_indices(i_measure)))
-                logging.info(f"Spectral indices count: {spectral_count}")
-            except Exception as e:
-                logging.error(f"Error getting spectral indices: {e}")
-
-            eradiate.run(experiment, measures=i_measure)
-
-        plot_image = kwargs.get("plot_image", False)
-        if plot_image:
+        if kwargs.get("plot_image", False):
             self._create_rgb_visualization(
                 experiment, output_dir, kwargs.get("id_to_plot", "rgb_camera")
             )
@@ -395,56 +359,99 @@ class EradiateBackend(SimulationBackend):
         hdrf_processor: HDRFProcessor,
         **kwargs,
     ) -> xr.Dataset:
-        """Run HDRF dual simulation workflow.
-
-        Executes:
-        1. Actual surface simulation
-        2. White reference simulation
-        3. HDRF computation (L_actual / L_reference)
-        4. Result merging and saving
-
-        Args:
-            scene_description: Scene description
-            scene_dir: Scene directory
-            output_dir: Output directory
-            hdrf_processor: HDRFProcessor instance
-            **kwargs: Additional options
-
-        Returns:
-            Combined results including HDRF datasets
-        """
-        # Execute dual simulations
-        actual_results, reference_results = hdrf_processor.execute_dual_simulation(
+        """HDRF workflow: actual + reference simulation → HDRF computation."""
+        actual_results, ref_results = hdrf_processor.execute_dual_simulation(
             scene_description, scene_dir, output_dir
         )
-
-        # Compute HDRF from results
-        hdrf_results = hdrf_processor.compute_hdrf(actual_results, reference_results)
-
-        # Save HDRF results
+        hdrf_results = hdrf_processor.compute_hdrf(actual_results, ref_results)
         hdrf_processor.save_hdrf_results(hdrf_results, output_dir)
 
-        # Merge HDRF results with actual results for unified return
-        # Convert to dict if results is xr.Dataset
-        if isinstance(actual_results, xr.Dataset):
-            actual_results_dict = {"results": actual_results}
-        else:
-            actual_results_dict = actual_results
+        actual_dict = actual_results if isinstance(actual_results, dict) else {"results": actual_results}
+        all_results = {**actual_dict, **hdrf_results}
 
-        all_results = {**actual_results_dict, **hdrf_results}
-
-        # Create visualizations if requested
-        plot_image = kwargs.get("plot_image", False)
-        if plot_image:
+        if kwargs.get("plot_image", False):
             self._create_hdrf_visualizations(hdrf_results, output_dir)
 
-        print("\n" + "=" * 70)
-        print("✓ HDRF workflow complete")
-        print(f"  Actual surface results: {len(actual_results_dict)} measures")
-        print(f"  HDRF results: {len(hdrf_results)} measures")
-        print(f"  Output directory: {output_dir}")
-        print("=" * 70 + "\n")
+        print(f"\n✓ HDRF workflow complete: {len(hdrf_results)} datasets")
+        return all_results
 
+    def _run_irradiance_workflow(
+        self,
+        scene_description: SceneDescription,
+        scene_dir: UPath,
+        output_dir: UPath,
+        irradiance_processor: IrradianceProcessor,
+        **kwargs,
+    ) -> xr.Dataset:
+        """Irradiance workflow: sensor simulation + white disk measurements."""
+        # Run sensor simulation if any sensors configured
+        if len(self.simulation_config.sensors) > 0:
+            print("\n[1/2] Sensor simulation...")
+            actual_results = self._run_standard_simulation(
+                scene_description, scene_dir, output_dir / "actual",
+                include_irradiance_measures=False,  # Exclude irradiance from actual scene
+                **kwargs
+            )
+        else:
+            print("\n[1/2] No sensors (irradiance-only mode)")
+            actual_results = {}
+
+        # Run irradiance measurements
+        print("\n[2/2] Irradiance measurements...")
+        irr_results = irradiance_processor.execute_irradiance_measurements(
+            scene_description, scene_dir, output_dir / "irradiance"
+        )
+
+        # Merge results
+        actual_dict = actual_results if isinstance(actual_results, dict) else {"results": actual_results}
+        all_results = {**actual_dict, **irr_results}
+
+        print(f"\n✓ Irradiance workflow complete: {len(irr_results)} measurements")
+        return all_results
+
+    def _run_combined_workflow(
+        self,
+        scene_description: SceneDescription,
+        scene_dir: UPath,
+        output_dir: UPath,
+        hdrf_processor: HDRFProcessor,
+        irradiance_processor: IrradianceProcessor,
+        **kwargs,
+    ) -> xr.Dataset:
+        """Combined workflow: sensors + HDRF + irradiance → reflectance (ρ = πL/E)."""
+        print("\n[1/3] Sensor simulation...")
+        actual_results = self._run_standard_simulation(
+            scene_description, scene_dir, output_dir / "actual", **kwargs
+        )
+
+        print("\n[2/3] HDRF reference simulation...")
+        ref_scene, _ = hdrf_processor.create_white_reference_scene(scene_description, scene_dir)
+        ref_results = self._run_standard_simulation(
+            ref_scene, scene_dir, output_dir / "hdrf_reference", **kwargs
+        )
+        hdrf_results = hdrf_processor.compute_hdrf(actual_results, ref_results)
+        hdrf_processor.save_hdrf_results(hdrf_results, output_dir)
+
+        print("\n[3/3] Irradiance measurements...")
+        irr_results = irradiance_processor.execute_irradiance_measurements(
+            scene_description, scene_dir, output_dir / "irradiance"
+        )
+
+        # Compute reflectance factors: ρ = πL/E
+        from s2gos_simulator.reflectance_processor import ReflectanceProcessor
+
+        actual_dict = actual_results if isinstance(actual_results, dict) else {"results": actual_results}
+        print("\nComputing reflectance (ρ = πL/E)...")
+        sensor_with_refl = ReflectanceProcessor().add_reflectance_to_results(
+            actual_dict, irr_results
+        )
+
+        all_results = {**sensor_with_refl, **hdrf_results, **irr_results}
+
+        if kwargs.get("plot_image", False):
+            self._create_hdrf_visualizations(hdrf_results, output_dir)
+
+        print(f"\n✓ Combined workflow complete: {len(all_results)} total datasets")
         return all_results
 
     def _create_hdrf_visualizations(
@@ -619,7 +626,12 @@ class EradiateBackend(SimulationBackend):
             )
             raise
 
-    def _create_experiment(self, scene_description: SceneDescription, scene_dir: UPath):
+    def _create_experiment(
+        self,
+        scene_description: SceneDescription,
+        scene_dir: UPath,
+        include_irradiance_measures: bool = True
+    ):
         """Create Eradiate experiment from scene description."""
         # Store scene_dir and scene_description for use in sensor translation
         self._current_scene_dir = scene_dir
@@ -749,8 +761,10 @@ class EradiateBackend(SimulationBackend):
 
         # Process 3D objects from scene description
         if scene_description.objects:
+            print(f"[DEBUG] Processing {len(scene_description.objects)} objects")
             for obj in scene_description.objects:
                 obj_type = obj.get("type", "ply")
+                print(f"[DEBUG] Object type: {obj_type}, keys: {list(obj.keys())}")
 
                 if obj_type == "shapegroup":
                     obj_dict = {"type": "shapegroup"}
@@ -833,13 +847,17 @@ class EradiateBackend(SimulationBackend):
                 elif obj_type == "disk":
                     center = obj["center"]
                     radius = obj["radius"]
-                    material_ref = obj["material"]
+                    obj["id"] = "disk_id"
+
+                    # Get the disk ID early so we can include it in obj_dict
+                    disk_id = obj.get("id") or obj.get("object_id", f"disk_{len(kdict)}")
 
                     obj_dict = {
                         "type": "disk",
                         "to_world": mi.ScalarTransform4f.translate(center)
                         @ mi.ScalarTransform4f.scale(radius),
-                        "bsdf": {"type": "ref", "id": f"_mat_{material_ref}"},
+                        "bsdf": {"type": "diffuse", "reflectance":{"type": "uniform", "value": 1.0}},
+                        "id": "disk_id",  
                     }
 
                 else:
@@ -893,7 +911,7 @@ class EradiateBackend(SimulationBackend):
 
         illumination = self._translate_illumination()
 
-        measures = self._translate_sensors(scene_description)
+        measures = self._translate_sensors(scene_description, include_irradiance_measures)
 
         geometry = self._create_geometry_from_atmosphere(scene_description)
 
@@ -940,22 +958,36 @@ class EradiateBackend(SimulationBackend):
             raise ValueError(f"Unknown atmosphere type: {atmosphere_type}")
 
     def _create_molecular_atmosphere_from_dict(self, mol_dict):
-        """Create molecular atmosphere directly from scene description data."""
-        thermoprops_id = mol_dict.get("thermoprops_identifier", "afgl_1986-us_standard")
-        altitude_min = mol_dict.get("altitude_min", 0.0)
-        altitude_max = mol_dict.get("altitude_max", 120000.0)
-        num_steps = (
-            (altitude_max - altitude_min) / mol_dict.get("altitude_step", 1000)
-        ) + 1
+        """Create molecular atmosphere from scene description.
+
+        Supports either joseki identifiers or CAMS NetCDF files.
+        """
+        # Check if using CAMS NetCDF file or joseki identifier
+        if "thermoprops_file" in mol_dict:
+            # Load CAMS NetCDF directly
+            import xarray as xr
+            from upath import UPath
+
+            thermoprops_file = UPath(mol_dict["thermoprops_file"])
+            thermoprops = xr.open_dataset(thermoprops_file).squeeze(drop=True)
+        else:
+            thermoprops_id = mol_dict.get("thermoprops_identifier", "afgl_1986-us_standard")
+            altitude_min = mol_dict.get("altitude_min", 0.0)
+            altitude_max = mol_dict.get("altitude_max", 120000.0)
+            num_steps = (
+                (altitude_max - altitude_min) / mol_dict.get("altitude_step", 1000)
+            ) + 1
+
+            thermoprops = {
+                "identifier": thermoprops_id,
+                "z": np.linspace(altitude_min, altitude_max, int(num_steps)) * ureg.m,
+            }
 
         # Read absorption database from scene config, fallback to Eradiate default
         absorption_data = mol_dict.get("absorption_database") or AbsorptionDatabase.default()
 
         atmosphere = MolecularAtmosphere(
-            thermoprops={
-                "identifier": thermoprops_id,
-                "z": np.linspace(altitude_min, altitude_max, int(num_steps)) * ureg.m,
-            },
+            thermoprops=thermoprops,
             absorption_data=absorption_data,
             has_absorption=mol_dict.get("has_absorption", True),
             has_scattering=mol_dict.get("has_scattering", True),
@@ -1111,7 +1143,7 @@ class EradiateBackend(SimulationBackend):
         return target_vec.tolist(), direction.tolist()
 
     def _translate_sensors(
-        self, scene_description: SceneDescription
+        self, scene_description: SceneDescription, include_irradiance_measures: bool = True
     ) -> List[Dict[str, Any]]:
         """Translate generic sensors and radiative quantities to Eradiate measures."""
         measures = []
@@ -1136,6 +1168,11 @@ class EradiateBackend(SimulationBackend):
                 raise ValueError(f"Unsupported sensor type: {type(sensor)}")
         for rad_quantity in self.simulation_config.radiative_quantities:
             measures.append(self._translate_radiative_quantity(rad_quantity))
+
+        # Only include irradiance measures if requested (exclude for actual scene in irradiance workflow)
+        if include_irradiance_measures:
+            for irradiance_meas in self.simulation_config.irradiance_measurements:
+                measures.append(self._create_irradiance_measure(irradiance_meas))
         return measures
 
     def _translate_satellite_sensor(
@@ -1273,6 +1310,13 @@ class EradiateBackend(SimulationBackend):
                     else 70.0
                 )
                 base_measure["up"] = view.up or [0, 0, 1]
+            elif sensor.instrument == GroundInstrumentType.HYPSTAR:
+                print("!!!!!!!!!!!!!!!!!!!!")
+                # base_measure["type"] = "radiancemeter"
+                base_measure["type"] = "perspective"
+                base_measure["film_resolution"] = [5, 5]
+                base_measure["fov"] = 5
+                base_measure["up"] = view.up or [0, 0, 1]
             else:
                 base_measure["type"] = "radiancemeter"
 
@@ -1365,6 +1409,52 @@ class EradiateBackend(SimulationBackend):
 
         return measure_config
 
+    def _create_irradiance_measure(
+        self, irradiance_config: IrradianceMeasurementConfig
+    ) -> Dict[str, Any]:
+        """Create BOA distant measure for irradiance measurement.
+
+        Uses the same technique as HDRF reference measurements: creates a
+        hemispherical distant sensor pointing at a white disk location to
+        measure downward irradiance at BOA.
+
+        Args:
+            irradiance_config: IrradianceMeasurementConfig with measurement settings
+
+        Returns:
+            Eradiate hdistant measure configuration
+        """
+        measure_id = sanitize_sensor_id(irradiance_config.id)
+
+        # Get disk coordinates if available (set by IrradianceProcessor)
+        if (
+            hasattr(self, "irradiance_disk_coords")
+            and self.irradiance_disk_coords is not None
+            and measure_id in self.irradiance_disk_coords
+        ):
+            target_xyz = list(self.irradiance_disk_coords[measure_id])
+            logging.info(
+                f"Using irradiance disk coordinates for '{measure_id}': {target_xyz}"
+            )
+        else:
+            # Fallback: use scene center at ground level
+            target_xyz = [0, 0, 0]
+            logging.warning(
+                f"No disk coordinates found for '{measure_id}', using [0, 0, 0]. "
+                "Make sure IrradianceProcessor sets coordinates before measure creation."
+            )
+
+        measure_config = {
+            "type": "hdistant",
+            "id": measure_id,
+            "srf": self._translate_srf(irradiance_config.srf),
+            "target": target_xyz,
+            "ray_offset": HDRF_RAY_OFFSET,  # Reuse same offset to avoid self-intersection
+            "spp": irradiance_config.samples_per_pixel,
+        }
+
+        return measure_config
+
     def _create_bhr_measure(self, rad_quantity) -> Dict[str, Any]:
         """Create hemispherical measure for BHR computation.
 
@@ -1407,22 +1497,22 @@ class EradiateBackend(SimulationBackend):
                 }
             elif srf.type == "dataset":
                 return srf.dataset_id
-            elif srf.type == "gaussian":
-                # Approximate Gaussian SRF as uniform SRF over FWHM range
-                # HYPSTAR requirements: FWHM = 3nm (<1000nm) or 10nm (≥1000nm)
-                #
-                # Note: Narrow-band Gaussian SRFs have compatibility issues with Eradiate's
-                # spectral grid selection, even in CKD mode. The working approach (from
-                # Eradiate's hyperspectral_timeseries.ipynb example) uses broad uniform SRFs
-                # during simulation and applies narrow Gaussian SRFs in post-processing.
-                #
-                # This uniform approximation captures the spectral width while ensuring
-                # reliable simulation. For future enhancement, implement two-stage workflow:
-                # 1. Simulate with broad uniform SRF (400-2400 nm)
-                # 2. Apply narrow Gaussian SRFs via apply_spectral_response() post-processing
-                wl_center = srf.wavelengths[0]  # Single center wavelength
-                fwhm = srf.fwhm
-                half_width = fwhm / 2.0
+            # elif srf.type == "gaussian":
+            #     # Approximate Gaussian SRF as uniform SRF over FWHM range
+            #     # HYPSTAR requirements: FWHM = 3nm (<1000nm) or 10nm (≥1000nm)
+            #     #
+            #     # Note: Narrow-band Gaussian SRFs have compatibility issues with Eradiate's
+            #     # spectral grid selection, even in CKD mode. The working approach (from
+            #     # Eradiate's hyperspectral_timeseries.ipynb example) uses broad uniform SRFs
+            #     # during simulation and applies narrow Gaussian SRFs in post-processing.
+            #     #
+            #     # This uniform approximation captures the spectral width while ensuring
+            #     # reliable simulation. For future enhancement, implement two-stage workflow:
+            #     # 1. Simulate with broad uniform SRF (400-2400 nm)
+            #     # 2. Apply narrow Gaussian SRFs via apply_spectral_response() post-processing
+            #     wl_center = srf.wavelengths[0]  # Single center wavelength
+            #     fwhm = srf.fwhm
+            #     half_width = fwhm / 2.0
 
                 return {
                     "type": "uniform",
