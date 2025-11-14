@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 from pydantic import BaseModel, Field, field_validator, model_validator
 from s2gos_utils import validate_config_version
 from s2gos_utils.io.paths import open_file, read_json
+from s2gos_utils.io.resolver import resolver
 from s2gos_utils.typing import PathLike
 from skyfield.api import load, wgs84
 
@@ -240,7 +241,8 @@ class DirectionalIllumination(Illumination):
         """
         # Load timescale and ephemeris
         ts = load.timescale()
-        planets = load("de421.bsp")
+        ephemeris_path = str(resolver.resolve("de421.bsp", strict=False))
+        planets = load(ephemeris_path)
 
         # Convert datetime to skyfield time
         skyfield_time = ts.utc(
