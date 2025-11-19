@@ -632,6 +632,7 @@ class EradiateBackend(SimulationBackend):
         scene_dir: UPath,
         include_irradiance_measures: bool = True
     ):
+        import mitsuba as mi
         """Create Eradiate experiment from scene description."""
         # Store scene_dir and scene_description for use in sensor translation
         self._current_scene_dir = scene_dir
@@ -740,7 +741,6 @@ class EradiateBackend(SimulationBackend):
         background = scene_description.background
 
         hamster_available = hamster_data_dict is not None
-        print(self._create_target_surface(scene_description, scene_dir, hamster_available))
         kdict.update(
             self._create_target_surface(scene_description, scene_dir, hamster_available)
         )
@@ -758,6 +758,32 @@ class EradiateBackend(SimulationBackend):
                     scene_description, scene_dir, hamster_available
                 )
             )
+
+        # TEMPORARY DEBUG: Add flat test surface if flag is enabled
+        if getattr(self, '_use_flat_test_surface', False):
+            import mitsuba as mi
+
+            print("[DEBUG] Adding flat test surface (50m × 50m)")
+            # Query terrain elevation at scene center
+            terrain_elev = self._query_terrain_elevation(scene_description, scene_dir, 0.0, 0.0)
+            print(f"[DEBUG] Terrain elevation at center: {terrain_elev:.2f}m")
+
+            # Create transform: translate to terrain elevation, then scale to 50m × 50m
+            to_world = mi.ScalarTransform4f.translate([0, 0, terrain_elev + 1])
+            to_world = to_world @ mi.ScalarTransform4f.scale([25, 25, 1])  # 50m × 50m (±25m)
+
+            # Create flat rectangle at terrain elevation
+            kdict["flat_test_surface"] = {
+                "type": "rectangle",
+                "to_world": to_world,
+                "bsdf": {
+                    "type": "ref",
+                    "id": "_mat_gobabeb_measured_rpv",  # Reference to RPV material
+                },
+                "id": "flat_test_surface",
+            }
+            print(f"[DEBUG] Flat surface added at elevation {terrain_elev:.2f}m")
+            print(f"[DEBUG] Material: gobabeb_measured_rpv")
 
         # Process 3D objects from scene description
         if scene_description.objects:
@@ -1239,6 +1265,7 @@ class EradiateBackend(SimulationBackend):
 
         # Handle terrain-relative height if enabled
         origin = list(view.origin)  # Make a copy to avoid modifying original
+        target = None  # Will be set later if needed
 
         if sensor.terrain_relative_height:
             x, y, z_offset = origin
@@ -1249,9 +1276,24 @@ class EradiateBackend(SimulationBackend):
             origin[2] = absolute_z
 
             logging.debug(
-                f"Sensor {sensor.id}: terrain={terrain_elevation:.2f}m, "
+                f"Sensor {sensor.id} origin: terrain={terrain_elevation:.2f}m, "
                 f"offset={z_offset:.2f}m, final_z={absolute_z:.2f}m"
             )
+
+            # Also adjust target if using LookAtViewing
+            if isinstance(view, LookAtViewing):
+                target = list(view.target)  # Make a copy
+                target_x, target_y, target_z_offset = target
+                target_terrain_elevation = self._query_terrain_elevation(
+                    scene_description, scene_dir, target_x, target_y
+                )
+                target_absolute_z = target_terrain_elevation + target_z_offset
+                target[2] = target_absolute_z
+
+                logging.debug(
+                    f"Sensor {sensor.id} target: terrain={target_terrain_elevation:.2f}m, "
+                    f"offset={target_z_offset:.2f}m, final_z={target_absolute_z:.2f}m"
+                )
 
         base_config = {
             "id": sanitize_sensor_id(sensor.id),
@@ -1266,7 +1308,7 @@ class EradiateBackend(SimulationBackend):
             base_config["film_resolution"] = sensor.resolution or [1024, 1024]
 
             if isinstance(view, LookAtViewing):
-                base_config["target"] = view.target
+                base_config["target"] = target if target is not None else view.target
                 base_config["up"] = view.up or [0, 0, 1]
             elif isinstance(view, AngularFromOriginViewing):
                 target, _ = self._calculate_target_from_angles(view)
@@ -1277,7 +1319,7 @@ class EradiateBackend(SimulationBackend):
             base_config["type"] = "radiancemeter"
 
             if isinstance(view, LookAtViewing):
-                base_config["target"] = view.target
+                base_config["target"] = target if target is not None else view.target
             elif isinstance(view, AngularFromOriginViewing):
                 target, _ = self._calculate_target_from_angles(view)
                 base_config["target"] = target
@@ -1312,6 +1354,7 @@ class EradiateBackend(SimulationBackend):
         elif isinstance(view, (LookAtViewing, AngularFromOriginViewing)):
             # Handle terrain-relative height if enabled
             origin = list(view.origin)  # Make a copy to avoid modifying original
+            target = None  # Will be set later if needed
 
             if sensor.terrain_relative_height:
                 x, y, z_offset = origin
@@ -1322,9 +1365,24 @@ class EradiateBackend(SimulationBackend):
                 origin[2] = absolute_z
 
                 logging.debug(
-                    f"Sensor {sensor.id}: terrain={terrain_elevation:.2f}m, "
+                    f"Sensor {sensor.id} origin: terrain={terrain_elevation:.2f}m, "
                     f"offset={z_offset:.2f}m, final_z={absolute_z:.2f}m"
                 )
+
+                # Also adjust target if using LookAtViewing
+                if isinstance(view, LookAtViewing):
+                    target = list(view.target)  # Make a copy
+                    target_x, target_y, target_z_offset = target
+                    target_terrain_elevation = self._query_terrain_elevation(
+                        scene_description, scene_dir, target_x, target_y
+                    )
+                    target_absolute_z = target_terrain_elevation + target_z_offset
+                    target[2] = target_absolute_z
+
+                    logging.debug(
+                        f"Sensor {sensor.id} target: terrain={target_terrain_elevation:.2f}m, "
+                        f"offset={target_z_offset:.2f}m, final_z={target_absolute_z:.2f}m"
+                    )
 
             base_measure["origin"] = origin
 
@@ -1333,25 +1391,24 @@ class EradiateBackend(SimulationBackend):
                 GroundInstrumentType.DHP_CAMERA,
             ]:
                 base_measure["type"] = "perspective"
-                base_measure["film_resolution"] = [1024, 1024]
-                base_measure["fov"] = (
+                base_measure["film_resolution"] = sensor.resolution or [1024, 1024]
+                base_measure["fov"] = sensor.fov or (
                     180.0
                     if sensor.instrument == GroundInstrumentType.DHP_CAMERA
                     else 70.0
                 )
                 base_measure["up"] = view.up or [0, 0, 1]
             elif sensor.instrument == GroundInstrumentType.HYPSTAR:
-                print("!!!!!!!!!!!!!!!!!!!!")
-                # base_measure["type"] = "radiancemeter"
+                # HYPSTAR acts as a narrow-FOV perspective camera
                 base_measure["type"] = "perspective"
-                base_measure["film_resolution"] = [5, 5]
-                base_measure["fov"] = 5
+                base_measure["film_resolution"] = sensor.resolution or [5, 5]
+                base_measure["fov"] = sensor.fov or 5.0
                 base_measure["up"] = view.up or [0, 0, 1]
             else:
                 base_measure["type"] = "radiancemeter"
 
             if isinstance(view, LookAtViewing):
-                base_measure["target"] = view.target
+                base_measure["target"] = target if target is not None else view.target
 
             elif isinstance(view, AngularFromOriginViewing):
                 target, _ = self._calculate_target_from_angles(view)
