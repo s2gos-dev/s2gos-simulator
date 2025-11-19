@@ -660,8 +660,10 @@ class UAVSensor(BaseSensor):
     resolution: Optional[List[int]] = Field(None)
     terrain_relative_height: bool = Field(
         False,
-        description="If True, z-coordinate in origin is offset from terrain elevation. "
-        "If False (default), z-coordinate is absolute elevation.",
+        description="If True, z-coordinates are interpreted as offsets from terrain elevation. "
+        "For LookAtViewing, both origin and target z-coordinates are terrain-relative. "
+        "For AngularFromOriginViewing, only origin z-coordinate is terrain-relative. "
+        "If False (default), all z-coordinates are absolute elevations.",
     )
 
     @model_validator(mode="after")
@@ -696,10 +698,20 @@ class GroundSensor(BaseSensor):
     platform_type: Literal[PlatformType.GROUND] = PlatformType.GROUND
     instrument: GroundInstrumentType
     viewing: Union[LookAtViewing, AngularFromOriginViewing]
+    fov: Optional[float] = Field(
+        None,
+        description="Field of view in degrees (for camera-like instruments: HYPSTAR, perspective_camera, dhp_camera)",
+    )
+    resolution: Optional[List[int]] = Field(
+        None,
+        description="Film resolution [width, height] (for camera-like instruments: HYPSTAR, perspective_camera, dhp_camera)",
+    )
     terrain_relative_height: bool = Field(
         False,
-        description="If True, z-coordinate in origin is offset from terrain elevation. "
-        "If False (default), z-coordinate is absolute elevation.",
+        description="If True, z-coordinates are interpreted as offsets from terrain elevation. "
+        "For LookAtViewing, both origin and target z-coordinates are terrain-relative. "
+        "For AngularFromOriginViewing, only origin z-coordinate is terrain-relative. "
+        "If False (default), all z-coordinates are absolute elevations.",
     )
 
     @model_validator(mode="after")
@@ -714,6 +726,14 @@ class GroundSensor(BaseSensor):
                     f"'{self.instrument.value}' requires a pointing view "
                     f"('directional' or 'angular_from_origin'), not '{self.viewing.type}'."
                 )
+
+            # Warn if camera-like instruments don't have fov/resolution specified
+            if self.instrument == GroundInstrumentType.HYPSTAR:
+                if self.fov is None or self.resolution is None:
+                    print(
+                        f"Warning: HYPSTAR sensor '{self.id or 'unnamed'}' does not have 'fov' "
+                        f"and/or 'resolution' specified. Using defaults: fov=5.0°, resolution=[5, 5]"
+                    )
 
         elif self.instrument in [
             GroundInstrumentType.PYRANOMETER,
