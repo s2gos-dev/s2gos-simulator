@@ -692,6 +692,7 @@ class GroundInstrumentType(str, Enum):
     PYRANOMETER = "pyranometer"
     FLUX_METER = "flux_meter"
     DHP_CAMERA = "dhp_camera"
+    RADIANCEMETER = "radiancemeter"
 
 
 class GroundSensor(BaseSensor):
