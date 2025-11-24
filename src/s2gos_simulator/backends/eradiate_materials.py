@@ -510,9 +510,12 @@ class EradiateMaterialAdapter:
         if hasattr(material, "distribution"):
             kdict["distribution"] = material.distribution
 
-        # Roughness (alpha, with 'roughness' as a common alias)
-        # Anisotropic (alpha_u, alpha_v) takes precedence
-        if hasattr(material, "alpha_u") or hasattr(material, "alpha_v"):
+        has_anisotropic = (
+            (hasattr(material, "alpha_u") and material.alpha_u is not None) or
+            (hasattr(material, "alpha_v") and material.alpha_v is not None)
+        )
+
+        if has_anisotropic:
             if (
                 hasattr(material, "alpha_u")
                 and material.alpha_u is not None
@@ -526,6 +529,7 @@ class EradiateMaterialAdapter:
             ):
                 kdict["alpha_v"] = material.alpha_v
         else:
+            # Use isotropic roughness (alpha or roughness field)
             alpha = getattr(material, "alpha", getattr(material, "roughness", None))
             if alpha is not None and not isinstance(alpha, dict):
                 kdict["alpha"] = alpha

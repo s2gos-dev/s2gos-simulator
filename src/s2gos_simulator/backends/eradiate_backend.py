@@ -184,6 +184,7 @@ class EradiateBackend(SimulationBackend):
                     GroundInstrumentType.PYRANOMETER,
                     GroundInstrumentType.FLUX_METER,
                     GroundInstrumentType.DHP_CAMERA,
+                    GroundInstrumentType.RADIANCEMETER,
                 ]:
                     errors.append(
                         f"Ground sensor {sensor.id} instrument type {sensor.instrument} is not supported"
@@ -1404,6 +1405,8 @@ class EradiateBackend(SimulationBackend):
                 base_measure["film_resolution"] = sensor.resolution or [5, 5]
                 base_measure["fov"] = sensor.fov or 5.0
                 base_measure["up"] = view.up or [0, 0, 1]
+            elif sensor.instrument == GroundInstrumentType.RADIANCEMETER:
+                base_measure["type"] = "radiancemeter"
             else:
                 base_measure["type"] = "radiancemeter"
 
@@ -1411,8 +1414,21 @@ class EradiateBackend(SimulationBackend):
                 base_measure["target"] = target if target is not None else view.target
 
             elif isinstance(view, AngularFromOriginViewing):
-                target, _ = self._calculate_target_from_angles(view)
+                target, direction = self._calculate_target_from_angles(view)
                 base_measure["target"] = target
+
+                # DEBUG: Print radiancemeter configuration
+                if sensor.instrument == GroundInstrumentType.RADIANCEMETER:
+                    print(f"\n{'='*70}")
+                    print(f"RADIANCEMETER DEBUG - Sensor: {sensor.id}")
+                    print(f"{'='*70}")
+                    print(f"Origin (adjusted):     {base_measure['origin']}")
+                    print(f"Target (calculated):   {target}")
+                    print(f"Direction:             {direction}")
+                    print(f"Zenith angle:          {view.zenith}°")
+                    print(f"Azimuth angle:         {view.azimuth}°")
+                    print(f"Terrain relative:      {sensor.terrain_relative_height}")
+                    print(f"{'='*70}\n")
         else:
             raise ValueError(
                 f"Unsupported viewing type for ground sensor: {type(view)}"
