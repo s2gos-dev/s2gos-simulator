@@ -460,10 +460,12 @@ class IrradianceMeasurementConfig(BaseModel):
         ..., description="Unique identifier for this irradiance measurement"
     )
     target_lat: float = Field(
-        ..., description="Target latitude for irradiance measurement (WGS84 decimal degrees)"
+        ...,
+        description="Target latitude for irradiance measurement (WGS84 decimal degrees)",
     )
     target_lon: float = Field(
-        ..., description="Target longitude for irradiance measurement (WGS84 decimal degrees)"
+        ...,
+        description="Target longitude for irradiance measurement (WGS84 decimal degrees)",
     )
     height_offset_m: float = Field(
         0.0,
@@ -483,6 +485,7 @@ class IrradianceMeasurementConfig(BaseModel):
     def validate_irradiance_config(self):
         """Validate irradiance measurement configuration."""
         import logging
+
         logger = logging.getLogger(__name__)
 
         # Validate lat/lon ranges
@@ -937,7 +940,11 @@ class SimulationConfig(BaseModel):
     @model_validator(mode="after")
     def validate_simulation_config(self):
         """Validate simulation configuration."""
-        if not self.sensors and not self.radiative_quantities and not self.irradiance_measurements:
+        if (
+            not self.sensors
+            and not self.radiative_quantities
+            and not self.irradiance_measurements
+        ):
             raise ValueError(
                 "At least one sensor, radiative quantity, or irradiance measurement must be specified"
             )
