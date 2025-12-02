@@ -129,8 +129,12 @@ class HDRFProcessor:
 
         # Delegate to IrradianceProcessor
         return self.irradiance_processor.create_reference_disk_scene(
-            scene_description, scene_dir, lat, lon, height_offset,
-            disk_id="white_reference_disk_hdrf"
+            scene_description,
+            scene_dir,
+            lat,
+            lon,
+            height_offset,
+            disk_id="white_reference_disk_hdrf",
         )
 
     def execute_dual_simulation(
@@ -230,16 +234,22 @@ class HDRFProcessor:
             )
 
             hdrf_dataset = xr.Dataset(
-                {"hdrf": hdrf, "radiance_actual": L_actual, "radiance_reference": L_ref},
+                {
+                    "hdrf": hdrf,
+                    "radiance_actual": L_actual,
+                    "radiance_reference": L_ref,
+                },
                 coords=hdrf.coords,
             )
 
-            hdrf_dataset.attrs.update({
-                "quantity": "hdrf",
-                "units": "dimensionless",
-                "method": "dual_simulation",
-                "timestamp": datetime.now().isoformat(),
-            })
+            hdrf_dataset.attrs.update(
+                {
+                    "quantity": "hdrf",
+                    "units": "dimensionless",
+                    "method": "dual_simulation",
+                    "timestamp": datetime.now().isoformat(),
+                }
+            )
 
             hdrf_datasets[measure_id] = hdrf_dataset
 

@@ -9,9 +9,9 @@ import logging
 from typing import Optional, Tuple
 
 import xarray as xr
-from scipy.interpolate import RegularGridInterpolator
 from s2gos_utils.io.paths import UPath
 from s2gos_utils.scene.description import SceneDescription
+from scipy.interpolate import RegularGridInterpolator
 
 logger = logging.getLogger(__name__)
 

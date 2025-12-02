@@ -511,9 +511,8 @@ class EradiateMaterialAdapter:
             kdict["distribution"] = material.distribution
 
         has_anisotropic = (
-            (hasattr(material, "alpha_u") and material.alpha_u is not None) or
-            (hasattr(material, "alpha_v") and material.alpha_v is not None)
-        )
+            hasattr(material, "alpha_u") and material.alpha_u is not None
+        ) or (hasattr(material, "alpha_v") and material.alpha_v is not None)
 
         if has_anisotropic:
             if (

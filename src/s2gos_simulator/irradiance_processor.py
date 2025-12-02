@@ -30,10 +30,15 @@ class IrradianceProcessor:
         """Check if any irradiance measurements are configured."""
         return len(self.simulation_config.irradiance_measurements) > 0
 
-    def _to_scene_coords(self, lat: float, lon: float, scene: SceneDescription) -> Tuple[float, float]:
+    def _to_scene_coords(
+        self, lat: float, lon: float, scene: SceneDescription
+    ) -> Tuple[float, float]:
         """Convert lat/lon to scene XY coordinates."""
         from s2gos_utils.coordinates import CoordinateSystem
-        coord_sys = CoordinateSystem(scene.location["center_lat"], scene.location["center_lon"])
+
+        coord_sys = CoordinateSystem(
+            scene.location["center_lat"], scene.location["center_lon"]
+        )
         return coord_sys.latlon_to_scene(lat, lon)
 
     def _get_disk_elevation(
@@ -47,9 +52,9 @@ class IrradianceProcessor:
         """Get disk elevation: terrain + height_offset_m."""
         from s2gos_simulator.terrain_query import TerrainQuery
 
-        terrain_elev = TerrainQuery(scene, scene_dir).query_elevation_at_geographic_coords(
-            lat, lon, raise_on_error=False
-        )
+        terrain_elev = TerrainQuery(
+            scene, scene_dir
+        ).query_elevation_at_geographic_coords(lat, lon, raise_on_error=False)
         disk_elev = terrain_elev + height_offset_m
 
         logger.info(
@@ -71,20 +76,27 @@ class IrradianceProcessor:
 
         Returns modified scene and disk coordinates (x, y, z).
         """
-        from s2gos_simulator.terrain_query import TerrainQuery
         from dataclasses import replace
+
+        from s2gos_simulator.terrain_query import TerrainQuery
 
         if height_offset_m < 0:
             raise ValueError(f"height_offset_m must be >= 0, got {height_offset_m}")
 
         # Validate coordinates
         tq = TerrainQuery(scene_description, scene_dir)
-        if not tq.validate_coordinate_bounds(target_lat, target_lon, max_distance_km=50.0):
-            logger.warning(f"Coordinates ({target_lat}, {target_lon}) far from scene center")
+        if not tq.validate_coordinate_bounds(
+            target_lat, target_lon, max_distance_km=50.0
+        ):
+            logger.warning(
+                f"Coordinates ({target_lat}, {target_lon}) far from scene center"
+            )
 
         # Get disk position
         x, y = self._to_scene_coords(target_lat, target_lon, scene_description)
-        z = self._get_disk_elevation(scene_description, scene_dir, target_lat, target_lon, height_offset_m)
+        z = self._get_disk_elevation(
+            scene_description, scene_dir, target_lat, target_lon, height_offset_m
+        )
 
         # Create disk object
         white_disk = {
@@ -113,7 +125,7 @@ class IrradianceProcessor:
         preserves wavelength dimension.
         """
         # Average over all non-wavelength dims (hemisphere sampling from hdistant measure)
-        wavelength_dims = {'w', 'wavelength', 'lambda', 'wl'}
+        wavelength_dims = {"w", "wavelength", "lambda", "wl"}
         hemisphere_dims = [d for d in radiance.dims if d not in wavelength_dims]
 
         L_mean = radiance.mean(dim=hemisphere_dims) if hemisphere_dims else radiance
@@ -122,18 +134,22 @@ class IrradianceProcessor:
         logger.info(f"BOA irradiance: mean={float(E_boa.mean()):.3e} W/m²/nm")
 
         # Minimal metadata
-        E_boa.attrs.update({
-            "quantity": "boa_irradiance",
-            "units": "W m^-2 nm^-1",
-            "conversion": "E = π × mean(L)",
-        })
+        E_boa.attrs.update(
+            {
+                "quantity": "boa_irradiance",
+                "units": "W m^-2 nm^-1",
+                "conversion": "E = π × mean(L)",
+            }
+        )
 
         if measurement_config:
-            E_boa.attrs.update({
-                "lat": measurement_config.target_lat,
-                "lon": measurement_config.target_lon,
-                "height_offset_m": measurement_config.height_offset_m,
-            })
+            E_boa.attrs.update(
+                {
+                    "lat": measurement_config.target_lat,
+                    "lon": measurement_config.target_lon,
+                    "height_offset_m": measurement_config.height_offset_m,
+                }
+            )
 
         return E_boa
 
@@ -153,7 +169,7 @@ class IrradianceProcessor:
         mkdir(output_dir)
 
         # Store disk coords for backend (TODO: refactor to avoid this side effect)
-        if not hasattr(self.backend, 'irradiance_disk_coords'):
+        if not hasattr(self.backend, "irradiance_disk_coords"):
             self.backend.irradiance_disk_coords = {}
 
         results = {}
@@ -162,9 +178,12 @@ class IrradianceProcessor:
 
             # Create disk scene
             disk_scene, disk_coords = self.create_reference_disk_scene(
-                scene_description, scene_dir,
-                config.target_lat, config.target_lon, config.height_offset_m,
-                disk_id=config.id
+                scene_description,
+                scene_dir,
+                config.target_lat,
+                config.target_lon,
+                config.height_offset_m,
+                disk_id=config.id,
             )
             self.backend.irradiance_disk_coords[config.id] = disk_coords
 
@@ -173,7 +192,7 @@ class IrradianceProcessor:
 
             # Build measure ID → index mapping for efficient lookup
             measure_map = {
-                getattr(m, 'id', f'measure_{i}'): i
+                getattr(m, "id", f"measure_{i}"): i
                 for i, m in enumerate(experiment.measures)
             }
 
@@ -188,7 +207,9 @@ class IrradianceProcessor:
             # Extract results (keyed by measure ID string, not index)
             result = experiment.results[config.id]
             if "radiance" not in result:
-                raise RuntimeError(f"No 'radiance' in results. Available: {list(result.data_vars)}")
+                raise RuntimeError(
+                    f"No 'radiance' in results. Available: {list(result.data_vars)}"
+                )
 
             # Convert to irradiance
             E_boa = self.convert_radiance_to_irradiance(result["radiance"], config)
@@ -196,12 +217,14 @@ class IrradianceProcessor:
             # Include TOA irradiance if available
             dataset_vars = {"boa_irradiance": E_boa}
             if "irradiance" in result:
-                wavelength_dims = {'w', 'wavelength', 'lambda', 'wl'}
+                wavelength_dims = {"w", "wavelength", "lambda", "wl"}
                 E_toa = result["irradiance"]
                 toa_dims = [d for d in E_toa.dims if d not in wavelength_dims]
                 if toa_dims:
                     E_toa = E_toa.mean(dim=toa_dims)
-                E_toa.attrs.update({"quantity": "toa_irradiance", "units": "W m^-2 nm^-1"})
+                E_toa.attrs.update(
+                    {"quantity": "toa_irradiance", "units": "W m^-2 nm^-1"}
+                )
                 dataset_vars["toa_irradiance"] = E_toa
 
             result_ds = xr.Dataset(dataset_vars)

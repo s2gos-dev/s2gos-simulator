@@ -63,14 +63,16 @@ class ReflectanceProcessor:
         reflectance = (np.pi * radiance) / irradiance_aligned
 
         # Add metadata
-        reflectance.attrs.update({
-            "quantity": "reflectance_factor",
-            "long_name": "Hemispherical-directional reflectance factor",
-            "units": "dimensionless",
-            "formula": "ρ = π × L / E",
-            "radiance_units": "W m^-2 sr^-1 nm^-1",
-            "irradiance_units": "W m^-2 nm^-1",
-        })
+        reflectance.attrs.update(
+            {
+                "quantity": "reflectance_factor",
+                "long_name": "Hemispherical-directional reflectance factor",
+                "units": "dimensionless",
+                "formula": "ρ = π × L / E",
+                "radiance_units": "W m^-2 sr^-1 nm^-1",
+                "irradiance_units": "W m^-2 nm^-1",
+            }
+        )
 
         if sensor_id is not None:
             reflectance.attrs["sensor_id"] = sensor_id
@@ -214,11 +216,13 @@ class ReflectanceProcessor:
         reflectance = (np.pi * radiance) / irradiance
         reflectance_unc = reflectance * rel_reflectance_unc
 
-        reflectance_unc.attrs.update({
-            "quantity": "reflectance_factor_uncertainty",
-            "long_name": "Reflectance factor standard deviation",
-            "units": "dimensionless",
-            "method": "error_propagation",
-        })
+        reflectance_unc.attrs.update(
+            {
+                "quantity": "reflectance_factor_uncertainty",
+                "long_name": "Reflectance factor standard deviation",
+                "units": "dimensionless",
+                "method": "error_propagation",
+            }
+        )
 
         return reflectance_unc

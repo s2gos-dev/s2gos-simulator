@@ -1,7 +1,6 @@
 import logging
 from typing import Any, Dict, List, Optional, Union
-import wave
-import json
+
 import numpy as np
 import xarray as xr
 from PIL import Image
@@ -272,8 +271,12 @@ class EradiateBackend(SimulationBackend):
 
         print(f"Eradiate simulation: {self.simulation_config.name}")
         print(f"  Sensors: {len(self.simulation_config.sensors)}")
-        print(f"  Radiative quantities: {len(self.simulation_config.radiative_quantities)}")
-        print(f"  Irradiance measurements: {len(self.simulation_config.irradiance_measurements)}\n")
+        print(
+            f"  Radiative quantities: {len(self.simulation_config.radiative_quantities)}"
+        )
+        print(
+            f"  Irradiance measurements: {len(self.simulation_config.irradiance_measurements)}\n"
+        )
 
         hdrf_proc = HDRFProcessor(self)
         irr_proc = IrradianceProcessor(self)
@@ -322,9 +325,60 @@ class EradiateBackend(SimulationBackend):
         from s2gos_simulator.terrain_query import TerrainQuery
 
         terrain_query = TerrainQuery(scene_description, scene_dir)
-        return terrain_query.query_elevation_at_scene_coords(
-            x, y, raise_on_error=True
-        )
+        return terrain_query.query_elevation_at_scene_coords(x, y, raise_on_error=True)
+
+    def _adjust_origin_target_for_terrain(
+        self,
+        sensor,
+        view,
+        origin: list[float],
+        scene_description: SceneDescription,
+        scene_dir: UPath,
+    ) -> tuple[list[float], Optional[list[float]]]:
+        """Adjust origin and optionally target for terrain-relative positioning.
+
+        Args:
+            sensor: Sensor with terrain_relative_height flag
+            view: Viewing configuration (may be LookAtViewing)
+            origin: Origin coordinates [x, y, z_offset] to adjust
+            scene_description: Scene description for terrain queries
+            scene_dir: Scene directory for DEM access
+
+        Returns:
+            Tuple of (adjusted_origin, adjusted_target_or_None)
+            - adjusted_origin: Origin with z adjusted for terrain elevation
+            - adjusted_target: Target adjusted for terrain if LookAtViewing, else None
+        """
+        target = None
+
+        if sensor.terrain_relative_height:
+            x, y, z_offset = origin
+            terrain_elevation = self._query_terrain_elevation(
+                scene_description, scene_dir, x, y
+            )
+            absolute_z = terrain_elevation + z_offset
+            origin[2] = absolute_z
+
+            logging.debug(
+                f"Sensor {sensor.id} origin: terrain={terrain_elevation:.2f}m, "
+                f"offset={z_offset:.2f}m, final_z={absolute_z:.2f}m"
+            )
+
+            if isinstance(view, LookAtViewing):
+                target = list(view.target)
+                target_x, target_y, target_z_offset = target
+                target_terrain_elevation = self._query_terrain_elevation(
+                    scene_description, scene_dir, target_x, target_y
+                )
+                target_absolute_z = target_terrain_elevation + target_z_offset
+                target[2] = target_absolute_z
+
+                logging.debug(
+                    f"Sensor {sensor.id} target: terrain={target_terrain_elevation:.2f}m, "
+                    f"offset={target_z_offset:.2f}m, final_z={target_absolute_z:.2f}m"
+                )
+
+        return origin, target
 
     def _run_standard_simulation(
         self,
@@ -367,7 +421,11 @@ class EradiateBackend(SimulationBackend):
         hdrf_results = hdrf_processor.compute_hdrf(actual_results, ref_results)
         hdrf_processor.save_hdrf_results(hdrf_results, output_dir)
 
-        actual_dict = actual_results if isinstance(actual_results, dict) else {"results": actual_results}
+        actual_dict = (
+            actual_results
+            if isinstance(actual_results, dict)
+            else {"results": actual_results}
+        )
         all_results = {**actual_dict, **hdrf_results}
 
         if kwargs.get("plot_image", False):
@@ -389,9 +447,11 @@ class EradiateBackend(SimulationBackend):
         if len(self.simulation_config.sensors) > 0:
             print("\n[1/2] Sensor simulation...")
             actual_results = self._run_standard_simulation(
-                scene_description, scene_dir, output_dir / "actual",
+                scene_description,
+                scene_dir,
+                output_dir / "actual",
                 include_irradiance_measures=False,  # Exclude irradiance from actual scene
-                **kwargs
+                **kwargs,
             )
         else:
             print("\n[1/2] No sensors (irradiance-only mode)")
@@ -404,7 +464,11 @@ class EradiateBackend(SimulationBackend):
         )
 
         # Merge results
-        actual_dict = actual_results if isinstance(actual_results, dict) else {"results": actual_results}
+        actual_dict = (
+            actual_results
+            if isinstance(actual_results, dict)
+            else {"results": actual_results}
+        )
         all_results = {**actual_dict, **irr_results}
 
         print(f"\n✓ Irradiance workflow complete: {len(irr_results)} measurements")
@@ -426,7 +490,9 @@ class EradiateBackend(SimulationBackend):
         )
 
         print("\n[2/3] HDRF reference simulation...")
-        ref_scene, _ = hdrf_processor.create_white_reference_scene(scene_description, scene_dir)
+        ref_scene, _ = hdrf_processor.create_white_reference_scene(
+            scene_description, scene_dir
+        )
         ref_results = self._run_standard_simulation(
             ref_scene, scene_dir, output_dir / "hdrf_reference", **kwargs
         )
@@ -441,7 +507,11 @@ class EradiateBackend(SimulationBackend):
         # Compute reflectance factors: ρ = πL/E
         from s2gos_simulator.reflectance_processor import ReflectanceProcessor
 
-        actual_dict = actual_results if isinstance(actual_results, dict) else {"results": actual_results}
+        actual_dict = (
+            actual_results
+            if isinstance(actual_results, dict)
+            else {"results": actual_results}
+        )
         print("\nComputing reflectance (ρ = πL/E)...")
         sensor_with_refl = ReflectanceProcessor().add_reflectance_to_results(
             actual_dict, irr_results
@@ -627,43 +697,36 @@ class EradiateBackend(SimulationBackend):
             )
             raise
 
-    def _create_experiment(
-        self,
-        scene_description: SceneDescription,
-        scene_dir: UPath,
-        include_irradiance_measures: bool = True
-    ):
-        import mitsuba as mi
-        """Create Eradiate experiment from scene description."""
-        # Store scene_dir and scene_description for use in sensor translation
-        self._current_scene_dir = scene_dir
-        self._current_scene_description = scene_description
+    def _translate_materials(
+        self, scene_description: SceneDescription, scene_dir: UPath
+    ) -> tuple[dict, dict]:
+        """Translate scene materials to Eradiate kernel dictionaries.
 
+        Args:
+            scene_description: Scene description with materials to translate
+            scene_dir: Base directory for resolving file paths
+
+        Returns:
+            Tuple of (kdict, kpmap) containing material definitions
+        """
         kdict = {}
         kpmap = {}
         adapter = EradiateMaterialAdapter()
 
-        # Process object materials that are dict definitions and add them to scene materials
-        self._process_object_materials(scene_description)
-
-        hamster_data_dict = self._get_hamster_data_for_scene(
-            scene_description, scene_dir
+        from s2gos_utils.scene.materials import (
+            BilambertianMaterial,
+            ConductorMaterial,
+            DielectricMaterial,
+            DiffuseMaterial,
+            MeasuredMaterial,
+            OceanLegacyMaterial,
+            PlasticMaterial,
+            PrincipledMaterial,
+            RoughConductorMaterial,
+            RPVMaterial,
         )
-        for mat_name, material in scene_description.materials.items():
-            # Use adapter pattern to create Eradiate-specific dictionaries
-            from s2gos_utils.scene.materials import (
-                BilambertianMaterial,
-                ConductorMaterial,
-                DielectricMaterial,
-                DiffuseMaterial,
-                MeasuredMaterial,
-                OceanLegacyMaterial,
-                PlasticMaterial,
-                PrincipledMaterial,
-                RoughConductorMaterial,
-                RPVMaterial,
-            )
 
+        for mat_name, material in scene_description.materials.items():
             if isinstance(material, DiffuseMaterial):
                 mat_def = adapter.create_diffuse_kdict(material)
                 mat_kdict = {f"_mat_{mat_name}": mat_def}
@@ -712,32 +775,337 @@ class EradiateBackend(SimulationBackend):
             kdict.update(mat_kdict)
             kpmap.update(mat_kpmap)
 
-        if hamster_data_dict is not None:
-            # Get region material names (indices 11+) - these should NOT use HAMSTER
-            region_material_names = {
-                mat_name for idx, mat_name in scene_description.material_indices.items()
-                if int(idx) >= 11
-            }
+        return kdict, kpmap
 
-            for surface_name, hamster_data in hamster_data_dict.items():
-                for mat_name in scene_description.materials.keys():
-                    # Skip region materials - they should use their specified spectrum
-                    if mat_name in region_material_names:
-                        continue
+    def _add_hamster_materials(
+        self,
+        kdict: dict,
+        kpmap: dict,
+        scene_description: SceneDescription,
+        hamster_data_dict: dict | None,
+    ) -> None:
+        """Add HAMSTER spatial albedo materials to kernel dictionaries.
 
-                    hamster_material_id = f"_mat_{mat_name}_{surface_name}"
+        Modifies kdict and kpmap in place to add HAMSTER-based materials
+        for each surface (target, buffer, background).
 
-                    hamster_kdict = adapter.create_hamster_kdict(
-                        material_id=hamster_material_id, albedo_data=hamster_data
-                    )
+        Args:
+            kdict: Kernel dictionary to update
+            kpmap: Kernel parameter map to update
+            scene_description: Scene description with materials
+            hamster_data_dict: HAMSTER albedo data (None if not available)
+        """
+        if hamster_data_dict is None:
+            return
 
-                    hamster_kpmap = adapter.create_hamster_kpmap(
-                        material_id=hamster_material_id, albedo_data=hamster_data
-                    )
+        adapter = EradiateMaterialAdapter()
 
-                    kdict.update(hamster_kdict)
-                    kpmap.update(hamster_kpmap)
+        # Get region material names (indices 11+) - these should NOT use HAMSTER
+        region_material_names = {
+            mat_name
+            for idx, mat_name in scene_description.material_indices.items()
+            if int(idx) >= 11
+        }
 
+        for surface_name, hamster_data in hamster_data_dict.items():
+            for mat_name in scene_description.materials.keys():
+                # Skip region materials - they should use their specified spectrum
+                if mat_name in region_material_names:
+                    continue
+
+                hamster_material_id = f"_mat_{mat_name}_{surface_name}"
+
+                hamster_kdict = adapter.create_hamster_kdict(
+                    material_id=hamster_material_id, albedo_data=hamster_data
+                )
+
+                hamster_kpmap = adapter.create_hamster_kpmap(
+                    material_id=hamster_material_id, albedo_data=hamster_data
+                )
+
+                kdict.update(hamster_kdict)
+                kpmap.update(hamster_kpmap)
+
+    def _create_transform_from_spec(self, transform_spec: dict):
+        """Create Mitsuba transform from transform specification.
+
+        Args:
+            transform_spec: Dict with 'translate', 'rotate', 'scale' keys
+
+        Returns:
+            Mitsuba ScalarTransform4f
+        """
+        import mitsuba as mi
+
+        to_world = mi.ScalarTransform4f()
+
+        if "translate" in transform_spec:
+            x, y, z = transform_spec["translate"]
+            to_world = to_world @ mi.ScalarTransform4f.translate([x, y, z])
+
+        if "rotate" in transform_spec:
+            rx, ry, rz = transform_spec["rotate"]
+            if rx != 0:
+                to_world = to_world @ mi.ScalarTransform4f.rotate([1, 0, 0], rx)
+            if ry != 0:
+                to_world = to_world @ mi.ScalarTransform4f.rotate([0, 1, 0], ry)
+            if rz != 0:
+                to_world = to_world @ mi.ScalarTransform4f.rotate([0, 0, 1], rz)
+
+        if "scale" in transform_spec:
+            scale = transform_spec["scale"]
+            to_world = to_world @ mi.ScalarTransform4f.scale(scale)
+
+        return to_world
+
+    def _create_transform_from_object(self, obj: dict):
+        """Create Mitsuba transform from object position, rotation, scale.
+
+        Args:
+            obj: Object dict with 'position', 'rotation', 'scale' keys
+
+        Returns:
+            Mitsuba ScalarTransform4f
+        """
+        import mitsuba as mi
+
+        x, y, z = obj["position"]
+        scale = obj["scale"]
+
+        to_world = mi.ScalarTransform4f.translate([x, y, z])
+
+        if "rotation" in obj:
+            rx, ry, rz = obj["rotation"]
+            if rx != 0:
+                to_world = to_world @ mi.ScalarTransform4f.rotate([1, 0, 0], rx)
+            if ry != 0:
+                to_world = to_world @ mi.ScalarTransform4f.rotate([0, 1, 0], ry)
+            if rz != 0:
+                to_world = to_world @ mi.ScalarTransform4f.rotate([0, 0, 1], rz)
+
+        to_world = to_world @ mi.ScalarTransform4f.scale(scale)
+        return to_world
+
+    def _create_ply_shape_dict(self, value: dict, scene_dir: UPath) -> dict:
+        """Create PLY shape dictionary for use in shapegroups.
+
+        Args:
+            value: PLY shape specification
+            scene_dir: Base directory for mesh paths
+
+        Returns:
+            Mitsuba shape dictionary
+        """
+        shape_dict = {"type": "ply"}
+
+        if "filename" in value:
+            mesh_path = scene_dir / value["filename"]
+            shape_dict["filename"] = str(mesh_path)
+
+        if "face_normals" in value:
+            shape_dict["face_normals"] = value["face_normals"]
+
+        if "bsdf" in value:
+            shape_dict["bsdf"] = value["bsdf"]
+
+        return shape_dict
+
+    def _add_shapegroup(self, kdict: dict, obj: dict, scene_dir: UPath) -> None:
+        """Add a shapegroup object to kernel dictionary.
+
+        Shapegroups are collections of shapes that can be instanced.
+
+        Args:
+            kdict: Kernel dictionary to update
+            obj: Shapegroup object specification
+            scene_dir: Base directory for resolving mesh paths
+        """
+        obj_dict = {"type": "shapegroup"}
+        if "id" in obj:
+            obj_dict["id"] = obj["id"]
+
+        for key, value in obj.items():
+            if key in ["type", "id", "object_id"]:
+                continue
+
+            if isinstance(value, dict) and value.get("type") == "ply":
+                shape_dict = self._create_ply_shape_dict(value, scene_dir)
+                obj_dict[key] = shape_dict
+            elif isinstance(value, dict) and value.get("type") in [
+                "sphere",
+                "cube",
+                "cylinder",
+                "rectangle",
+                "disk",
+            ]:
+                obj_dict[key] = value
+            elif not isinstance(value, dict):
+                obj_dict[key] = value
+            else:
+                logging.warning(
+                    f"Skipping unrecognized entry in shapegroup '{key}': "
+                    f"{value.get('type', 'unknown')}"
+                )
+
+        obj_id = obj.get("id") or obj.get("object_id", f"shapegroup_{len(kdict)}")
+        kdict[obj_id] = obj_dict
+
+    def _add_instance(self, kdict: dict, obj: dict) -> None:
+        """Add an instance object to kernel dictionary.
+
+        Instances reference shapegroups with transformations.
+
+        Args:
+            kdict: Kernel dictionary to update
+            obj: Instance object specification
+        """
+        obj_dict = {"type": "instance", "shapegroup": obj["shapegroup"]}
+        if "object_id" in obj:
+            obj_dict["id"] = obj["object_id"]
+
+        if "to_world" in obj:
+            transform_spec = obj["to_world"]
+            if transform_spec.get("type") == "transform":
+                to_world = self._create_transform_from_spec(transform_spec)
+                obj_dict["to_world"] = to_world
+            else:
+                obj_dict["to_world"] = obj["to_world"]
+
+        obj_id = obj.get("id") or obj.get("object_id", f"instance_{len(kdict)}")
+        kdict[obj_id] = obj_dict
+
+    def _add_disk(self, kdict: dict, obj: dict) -> None:
+        """Add a disk object to kernel dictionary.
+
+        Creates a circular disk with Lambertian white material.
+
+        Args:
+            kdict: Kernel dictionary to update
+            obj: Disk object specification
+        """
+        import mitsuba as mi
+
+        center = obj["center"]
+        radius = obj["radius"]
+        disk_id = obj.get("id") or obj.get("object_id", f"disk_{len(kdict)}")
+
+        obj_dict = {
+            "type": "disk",
+            "to_world": (
+                mi.ScalarTransform4f.translate(center)
+                @ mi.ScalarTransform4f.scale(radius)
+            ),
+            "bsdf": {
+                "type": "diffuse",
+                "reflectance": {"type": "uniform", "value": 1.0},
+            },
+            "id": disk_id,
+        }
+
+        kdict[disk_id] = obj_dict
+
+    def _add_ply_mesh(self, kdict: dict, obj: dict, scene_dir: UPath) -> None:
+        """Add a PLY mesh object to kernel dictionary.
+
+        Handles mesh loading with optional materials, transforms, and face normals.
+
+        Args:
+            kdict: Kernel dictionary to update
+            obj: PLY mesh object specification
+            scene_dir: Base directory for resolving mesh paths
+        """
+        object_mesh_path = scene_dir / obj["mesh"]
+        obj_dict = {
+            "type": "ply",
+            "filename": str(object_mesh_path),
+            "id": obj["id"],
+        }
+
+        if "face_normals" in obj:
+            obj_dict["face_normals"] = obj["face_normals"]
+
+        if "material" in obj:
+            material = obj["material"]
+            if isinstance(material, str):
+                obj_dict["bsdf"] = {"type": "ref", "id": f"_mat_{material}"}
+            else:
+                obj_dict["bsdf"] = {
+                    "type": "diffuse",
+                    "reflectance": {"type": "uniform", "value": 0.5},
+                }
+
+        if "position" in obj and "scale" in obj:
+            to_world = self._create_transform_from_object(obj)
+            obj_dict["to_world"] = to_world
+
+        obj_id = obj.get("id") or obj.get("object_id", f"object_{len(kdict)}")
+        kdict[obj_id] = obj_dict
+
+    def _add_scene_objects(
+        self, kdict: dict, scene_description: SceneDescription, scene_dir: UPath
+    ) -> None:
+        """Add 3D objects from scene description to kernel dictionary.
+
+        Processes all object types: shapegroups, instances, vegetation
+        collections, disks, and PLY meshes.
+
+        Args:
+            kdict: Kernel dictionary to update
+            scene_description: Scene with objects to process
+            scene_dir: Base directory for resolving mesh paths
+        """
+        if not scene_description.objects:
+            return
+
+        logging.info(f"Processing {len(scene_description.objects)} objects")
+
+        for obj in scene_description.objects:
+            obj_type = obj.get("type", "ply")
+
+            if obj_type == "shapegroup":
+                self._add_shapegroup(kdict, obj, scene_dir)
+            elif obj_type == "instance":
+                self._add_instance(kdict, obj)
+            elif obj_type == "vegetation_collection":
+                self._expand_vegetation_collection(obj, scene_dir, kdict)
+            elif obj_type == "disk":
+                self._add_disk(kdict, obj)
+            else:  # Default to PLY mesh
+                self._add_ply_mesh(kdict, obj, scene_dir)
+
+    def _create_experiment(
+        self,
+        scene_description: SceneDescription,
+        scene_dir: UPath,
+        include_irradiance_measures: bool = True,
+    ):
+        """Create Eradiate experiment from scene description.
+
+        Args:
+            scene_description: Scene description with all scene data
+            scene_dir: Base directory for resolving file paths
+            include_irradiance_measures: Whether to include irradiance measurements
+
+        Returns:
+            AtmosphereExperiment configured for the scene
+        """
+        # Store scene_dir and scene_description for use in sensor translation
+        self._current_scene_dir = scene_dir
+        self._current_scene_description = scene_description
+
+        # Process object materials that are dict definitions and add them to scene materials
+        self._process_object_materials(scene_description)
+
+        # Translate materials to Eradiate format
+        kdict, kpmap = self._translate_materials(scene_description, scene_dir)
+
+        # Add HAMSTER spatial albedo materials if available
+        hamster_data_dict = self._get_hamster_data_for_scene(
+            scene_description, scene_dir
+        )
+        self._add_hamster_materials(kdict, kpmap, scene_description, hamster_data_dict)
+
+        # Create surfaces
         buffer = scene_description.buffer
         background = scene_description.background
 
@@ -760,185 +1128,17 @@ class EradiateBackend(SimulationBackend):
                 )
             )
 
-        # TEMPORARY DEBUG: Add flat test surface if flag is enabled
-        if getattr(self, '_use_flat_test_surface', False):
-            import mitsuba as mi
+        # Add 3D objects from scene
+        self._add_scene_objects(kdict, scene_description, scene_dir)
 
-            print("[DEBUG] Adding flat test surface (50m × 50m)")
-            # Query terrain elevation at scene center
-            terrain_elev = self._query_terrain_elevation(scene_description, scene_dir, 0.0, 0.0)
-            print(f"[DEBUG] Terrain elevation at center: {terrain_elev:.2f}m")
-
-            # Create transform: translate to terrain elevation, then scale to 50m × 50m
-            to_world = mi.ScalarTransform4f.translate([0, 0, terrain_elev + 1])
-            to_world = to_world @ mi.ScalarTransform4f.scale([25, 25, 1])  # 50m × 50m (±25m)
-
-            # Create flat rectangle at terrain elevation
-            kdict["flat_test_surface"] = {
-                "type": "rectangle",
-                "to_world": to_world,
-                "bsdf": {
-                    "type": "ref",
-                    "id": "_mat_gobabeb_measured_rpv",  # Reference to RPV material
-                },
-                "id": "flat_test_surface",
-            }
-            print(f"[DEBUG] Flat surface added at elevation {terrain_elev:.2f}m")
-            print(f"[DEBUG] Material: gobabeb_measured_rpv")
-
-        # Process 3D objects from scene description
-        if scene_description.objects:
-            print(f"[DEBUG] Processing {len(scene_description.objects)} objects")
-            for obj in scene_description.objects:
-                obj_type = obj.get("type", "ply")
-                print(f"[DEBUG] Object type: {obj_type}, keys: {list(obj.keys())}")
-
-                if obj_type == "shapegroup":
-                    obj_dict = {"type": "shapegroup"}
-                    if "id" in obj:
-                        obj_dict["id"] = obj["id"]
-
-                    for key, value in obj.items():
-                        if key not in ["type", "id", "object_id"]:
-                            if isinstance(value, dict) and value.get("type") == "ply":
-                                shape_dict = {"type": "ply"}
-                                if "filename" in value:
-                                    mesh_path = scene_dir / value["filename"]
-                                    shape_dict["filename"] = str(mesh_path)
-                                if "face_normals" in value:
-                                    shape_dict["face_normals"] = value["face_normals"]
-                                if "bsdf" in value:
-                                    shape_dict["bsdf"] = value["bsdf"]
-                                obj_dict[key] = shape_dict
-
-                            elif isinstance(value, dict) and value.get("type") in [
-                                "sphere",
-                                "cube",
-                                "cylinder",
-                                "rectangle",
-                                "disk",
-                            ]:
-                                obj_dict[key] = value
-
-                            elif not isinstance(value, dict):
-                                obj_dict[key] = value
-
-                            else:
-                                logging.warning(
-                                    f"Skipping unrecognized entry in shapegroup '{key}': {value.get('type', 'unknown')}"
-                                )
-                                continue
-
-                elif obj_type == "instance":
-                    obj_dict = {"type": "instance", "shapegroup": obj["shapegroup"]}
-                    if "object_id" in obj:
-                        obj_dict["id"] = obj["object_id"]
-
-                    if "to_world" in obj:
-                        transform_spec = obj["to_world"]
-                        if transform_spec.get("type") == "transform":
-                            to_world = mi.ScalarTransform4f()
-
-                            if "translate" in transform_spec:
-                                x, y, z = transform_spec["translate"]
-                                to_world = to_world @ mi.ScalarTransform4f.translate(
-                                    [x, y, z]
-                                )
-
-                            if "rotate" in transform_spec:
-                                rx, ry, rz = transform_spec["rotate"]
-                                if rx != 0:
-                                    to_world = to_world @ mi.ScalarTransform4f.rotate(
-                                        [1, 0, 0], rx
-                                    )
-                                if ry != 0:
-                                    to_world = to_world @ mi.ScalarTransform4f.rotate(
-                                        [0, 1, 0], ry
-                                    )
-                                if rz != 0:
-                                    to_world = to_world @ mi.ScalarTransform4f.rotate(
-                                        [0, 0, 1], rz
-                                    )
-
-                            if "scale" in transform_spec:
-                                scale = transform_spec["scale"]
-                                to_world = to_world @ mi.ScalarTransform4f.scale(scale)
-
-                            obj_dict["to_world"] = to_world
-                        else:
-                            obj_dict["to_world"] = obj["to_world"]
-
-                elif obj_type == "vegetation_collection":
-                    self._expand_vegetation_collection(obj, scene_dir, kdict)
-                    continue
-                elif obj_type == "disk":
-                    center = obj["center"]
-                    radius = obj["radius"]
-                    obj["id"] = "disk_id"
-
-                    # Get the disk ID early so we can include it in obj_dict
-                    disk_id = obj.get("id") or obj.get("object_id", f"disk_{len(kdict)}")
-
-                    obj_dict = {
-                        "type": "disk",
-                        "to_world": mi.ScalarTransform4f.translate(center)
-                        @ mi.ScalarTransform4f.scale(radius),
-                        "bsdf": {"type": "diffuse", "reflectance":{"type": "uniform", "value": 1.0}},
-                        "id": "disk_id",  
-                    }
-
-                else:
-                    object_mesh_path = scene_dir / obj["mesh"]
-                    obj_dict = {
-                        "type": "ply",
-                        "filename": str(object_mesh_path),
-                        "id": obj["id"],
-                    }
-
-                    if "face_normals" in obj:
-                        obj_dict["face_normals"] = obj["face_normals"]
-
-                    if "material" in obj:
-                        material = obj["material"]
-                        if isinstance(material, str):
-                            obj_dict["bsdf"] = {"type": "ref", "id": f"_mat_{material}"}
-                        else:
-                            obj_dict["bsdf"] = {
-                                "type": "diffuse",
-                                "reflectance": {"type": "uniform", "value": 0.5},
-                            }
-
-                    if "position" in obj and "scale" in obj:
-                        x, y, z = obj["position"]
-                        scale = obj["scale"]
-
-                        to_world = mi.ScalarTransform4f.translate([x, y, z])
-
-                        if "rotation" in obj:
-                            rx, ry, rz = obj["rotation"]
-                            if rx != 0:
-                                to_world = to_world @ mi.ScalarTransform4f.rotate(
-                                    [1, 0, 0], rx
-                                )
-                            if ry != 0:
-                                to_world = to_world @ mi.ScalarTransform4f.rotate(
-                                    [0, 1, 0], ry
-                                )
-                            if rz != 0:
-                                to_world = to_world @ mi.ScalarTransform4f.rotate(
-                                    [0, 0, 1], rz
-                                )
-
-                        to_world = to_world @ mi.ScalarTransform4f.scale(scale)
-                        obj_dict["to_world"] = to_world
-                obj_id = obj.get("id") or obj.get("object_id", f"object_{len(kdict)}")
-                kdict[obj_id] = obj_dict
-
+        # Create experiment components
         atmosphere = self._create_atmosphere_from_config(scene_description)
 
         illumination = self._translate_illumination()
 
-        measures = self._translate_sensors(scene_description, include_irradiance_measures)
+        measures = self._translate_sensors(
+            scene_description, include_irradiance_measures
+        )
 
         geometry = self._create_geometry_from_atmosphere(scene_description)
 
@@ -998,7 +1198,9 @@ class EradiateBackend(SimulationBackend):
             thermoprops_file = UPath(mol_dict["thermoprops_file"])
             thermoprops = xr.open_dataset(thermoprops_file).squeeze(drop=True)
         else:
-            thermoprops_id = mol_dict.get("thermoprops_identifier", "afgl_1986-us_standard")
+            thermoprops_id = mol_dict.get(
+                "thermoprops_identifier", "afgl_1986-us_standard"
+            )
             altitude_min = mol_dict.get("altitude_min", 0.0)
             altitude_max = mol_dict.get("altitude_max", 120000.0)
             num_steps = (
@@ -1011,7 +1213,9 @@ class EradiateBackend(SimulationBackend):
             }
 
         # Read absorption database from scene config, fallback to Eradiate default
-        absorption_data = mol_dict.get("absorption_database") or AbsorptionDatabase.default()
+        absorption_data = (
+            mol_dict.get("absorption_database") or AbsorptionDatabase.default()
+        )
 
         atmosphere = MolecularAtmosphere(
             thermoprops=thermoprops,
@@ -1170,7 +1374,9 @@ class EradiateBackend(SimulationBackend):
         return target_vec.tolist(), direction.tolist()
 
     def _translate_sensors(
-        self, scene_description: SceneDescription, include_irradiance_measures: bool = True
+        self,
+        scene_description: SceneDescription,
+        include_irradiance_measures: bool = True,
     ) -> List[Dict[str, Any]]:
         """Translate generic sensors and radiative quantities to Eradiate measures."""
         measures = []
@@ -1264,37 +1470,10 @@ class EradiateBackend(SimulationBackend):
         """
         view = sensor.viewing
 
-        # Handle terrain-relative height if enabled
-        origin = list(view.origin)  # Make a copy to avoid modifying original
-        target = None  # Will be set later if needed
-
-        if sensor.terrain_relative_height:
-            x, y, z_offset = origin
-            terrain_elevation = self._query_terrain_elevation(
-                scene_description, scene_dir, x, y
-            )
-            absolute_z = terrain_elevation + z_offset
-            origin[2] = absolute_z
-
-            logging.debug(
-                f"Sensor {sensor.id} origin: terrain={terrain_elevation:.2f}m, "
-                f"offset={z_offset:.2f}m, final_z={absolute_z:.2f}m"
-            )
-
-            # Also adjust target if using LookAtViewing
-            if isinstance(view, LookAtViewing):
-                target = list(view.target)  # Make a copy
-                target_x, target_y, target_z_offset = target
-                target_terrain_elevation = self._query_terrain_elevation(
-                    scene_description, scene_dir, target_x, target_y
-                )
-                target_absolute_z = target_terrain_elevation + target_z_offset
-                target[2] = target_absolute_z
-
-                logging.debug(
-                    f"Sensor {sensor.id} target: terrain={target_terrain_elevation:.2f}m, "
-                    f"offset={target_z_offset:.2f}m, final_z={target_absolute_z:.2f}m"
-                )
+        origin = list(view.origin)
+        origin, target = self._adjust_origin_target_for_terrain(
+            sensor, view, origin, scene_description, scene_dir
+        )
 
         base_config = {
             "id": sanitize_sensor_id(sensor.id),
@@ -1353,37 +1532,10 @@ class EradiateBackend(SimulationBackend):
             base_measure["direction"] = [0, 0, 1] if view.upward_looking else [0, 0, -1]
 
         elif isinstance(view, (LookAtViewing, AngularFromOriginViewing)):
-            # Handle terrain-relative height if enabled
-            origin = list(view.origin)  # Make a copy to avoid modifying original
-            target = None  # Will be set later if needed
-
-            if sensor.terrain_relative_height:
-                x, y, z_offset = origin
-                terrain_elevation = self._query_terrain_elevation(
-                    scene_description, scene_dir, x, y
-                )
-                absolute_z = terrain_elevation + z_offset
-                origin[2] = absolute_z
-
-                logging.debug(
-                    f"Sensor {sensor.id} origin: terrain={terrain_elevation:.2f}m, "
-                    f"offset={z_offset:.2f}m, final_z={absolute_z:.2f}m"
-                )
-
-                # Also adjust target if using LookAtViewing
-                if isinstance(view, LookAtViewing):
-                    target = list(view.target)  # Make a copy
-                    target_x, target_y, target_z_offset = target
-                    target_terrain_elevation = self._query_terrain_elevation(
-                        scene_description, scene_dir, target_x, target_y
-                    )
-                    target_absolute_z = target_terrain_elevation + target_z_offset
-                    target[2] = target_absolute_z
-
-                    logging.debug(
-                        f"Sensor {sensor.id} target: terrain={target_terrain_elevation:.2f}m, "
-                        f"offset={target_z_offset:.2f}m, final_z={target_absolute_z:.2f}m"
-                    )
+            origin = list(view.origin)
+            origin, target = self._adjust_origin_target_for_terrain(
+                sensor, view, origin, scene_description, scene_dir
+            )
 
             base_measure["origin"] = origin
 
@@ -1419,16 +1571,16 @@ class EradiateBackend(SimulationBackend):
 
                 # DEBUG: Print radiancemeter configuration
                 if sensor.instrument == GroundInstrumentType.RADIANCEMETER:
-                    print(f"\n{'='*70}")
+                    print(f"\n{'=' * 70}")
                     print(f"RADIANCEMETER DEBUG - Sensor: {sensor.id}")
-                    print(f"{'='*70}")
+                    print(f"{'=' * 70}")
                     print(f"Origin (adjusted):     {base_measure['origin']}")
                     print(f"Target (calculated):   {target}")
                     print(f"Direction:             {direction}")
                     print(f"Zenith angle:          {view.zenith}°")
                     print(f"Azimuth angle:         {view.azimuth}°")
                     print(f"Terrain relative:      {sensor.terrain_relative_height}")
-                    print(f"{'='*70}\n")
+                    print(f"{'=' * 70}\n")
         else:
             raise ValueError(
                 f"Unsupported viewing type for ground sensor: {type(view)}"
@@ -1600,28 +1752,28 @@ class EradiateBackend(SimulationBackend):
                 }
             elif srf.type == "dataset":
                 return srf.dataset_id
-            # elif srf.type == "gaussian":
-            #     # Approximate Gaussian SRF as uniform SRF over FWHM range
-            #     # HYPSTAR requirements: FWHM = 3nm (<1000nm) or 10nm (≥1000nm)
-            #     #
-            #     # Note: Narrow-band Gaussian SRFs have compatibility issues with Eradiate's
-            #     # spectral grid selection, even in CKD mode. The working approach (from
-            #     # Eradiate's hyperspectral_timeseries.ipynb example) uses broad uniform SRFs
-            #     # during simulation and applies narrow Gaussian SRFs in post-processing.
-            #     #
-            #     # This uniform approximation captures the spectral width while ensuring
-            #     # reliable simulation. For future enhancement, implement two-stage workflow:
-            #     # 1. Simulate with broad uniform SRF (400-2400 nm)
-            #     # 2. Apply narrow Gaussian SRFs via apply_spectral_response() post-processing
-            #     wl_center = srf.wavelengths[0]  # Single center wavelength
-            #     fwhm = srf.fwhm
-            #     half_width = fwhm / 2.0
+                # elif srf.type == "gaussian":
+                #     # Approximate Gaussian SRF as uniform SRF over FWHM range
+                #     # HYPSTAR requirements: FWHM = 3nm (<1000nm) or 10nm (≥1000nm)
+                #     #
+                #     # Note: Narrow-band Gaussian SRFs have compatibility issues with Eradiate's
+                #     # spectral grid selection, even in CKD mode. The working approach (from
+                #     # Eradiate's hyperspectral_timeseries.ipynb example) uses broad uniform SRFs
+                #     # during simulation and applies narrow Gaussian SRFs in post-processing.
+                #     #
+                #     # This uniform approximation captures the spectral width while ensuring
+                #     # reliable simulation. For future enhancement, implement two-stage workflow:
+                #     # 1. Simulate with broad uniform SRF (400-2400 nm)
+                #     # 2. Apply narrow Gaussian SRFs via apply_spectral_response() post-processing
+                #     wl_center = srf.wavelengths[0]  # Single center wavelength
+                #     fwhm = srf.fwhm
+                #     half_width = fwhm / 2.0
 
                 return {
                     "type": "uniform",
                     "wmin": wl_center - half_width,
                     "wmax": wl_center + half_width,
-                    "value": 1.0
+                    "value": 1.0,
                 }
             elif srf.type == "custom":
                 if srf.data and "wavelengths" in srf.data and "values" in srf.data:
@@ -1672,6 +1824,72 @@ class EradiateBackend(SimulationBackend):
             "illumination_type": self.simulation_config.illumination.type,
         }
 
+    def _create_selectbsdf_material(
+        self,
+        surface_name: str,
+        scene_description: SceneDescription,
+        scene_dir: UPath,
+        texture_path: UPath,
+        hamster_available: bool = False,
+    ) -> tuple[np.ndarray, list[str], dict]:
+        """Create selectbsdf material dictionary for a surface.
+
+        Args:
+            surface_name: Name of surface ("target", "buffer", or "background")
+            scene_description: Scene description containing material information
+            scene_dir: Directory containing scene assets
+            texture_path: Path to selection texture file
+            hamster_available: Whether HAMSTER data is available
+
+        Returns:
+            Tuple of (selection_texture_data, material_ids, material_dict)
+            where material_dict is the selectbsdf configuration
+        """
+        # Load and prepare selection texture
+        with open_file(texture_path, "rb") as f:
+            texture_image = Image.open(f)
+            texture_image.load()
+        selection_texture_data = np.array(texture_image)
+        selection_texture_data = np.atleast_3d(selection_texture_data)
+
+        material_indices = scene_description.material_indices
+        material_ids = self._get_material_ids_from_scene(scene_description)
+
+        if hamster_available:
+            # Only apply HAMSTER suffix to base landcover materials (indices 0-10)
+            # Region materials (indices 11+) keep their original names
+            material_ids = [
+                f"{mat_id}_{surface_name}" if int(idx) < 11 else mat_id
+                for idx, mat_id in zip(
+                    sorted(material_indices.keys(), key=int), material_ids
+                )
+            ]
+
+        material_id = (
+            "terrain_material"
+            if surface_name == "target"
+            else f"{surface_name}_material"
+        )
+        bsdf_prefix = "terrain" if surface_name == "target" else surface_name
+
+        material_dict = {
+            "type": "selectbsdf",
+            "id": material_id,
+            "indices": {
+                "type": "bitmap",
+                "raw": True,
+                "filter_type": "nearest",
+                "wrap_mode": "clamp",
+                "data": selection_texture_data,
+            },
+            **{
+                f"{bsdf_prefix}_bsdf_{i:02d}": {"type": "ref", "id": f"_mat_{mat_id}"}
+                for i, mat_id in enumerate(material_ids)
+            },
+        }
+
+        return selection_texture_data, material_ids, material_dict
+
     def _create_target_surface(
         self,
         scene_description: SceneDescription,
@@ -1683,42 +1901,18 @@ class EradiateBackend(SimulationBackend):
         target_mesh_path = scene_dir / target_config["mesh"]
         target_texture_path = scene_dir / target_config["selection_texture"]
 
-        with open_file(target_texture_path, "rb") as f:
-            texture_image = Image.open(f)
-            texture_image.load()
-        selection_texture_data = np.array(texture_image)
-        selection_texture_data = np.atleast_3d(selection_texture_data)
+        # Create selectbsdf material (common logic extracted)
+        _, _, material_dict = self._create_selectbsdf_material(
+            "target",
+            scene_description,
+            scene_dir,
+            target_texture_path,
+            hamster_available,
+        )
 
-        # Material region overrides are now applied by the generator during texture creation
-        # No need to modify texture here - it's already been modified
-
-        material_indices = scene_description.material_indices
-        material_ids = self._get_material_ids_from_scene(scene_description)
-
-        if hamster_available:
-            # Only apply HAMSTER suffix to base landcover materials (indices 0-10)
-            # Region materials (indices 11+) keep their original names
-            material_ids = [
-                f"{mat_id}_target" if int(idx) < 11 else mat_id
-                for idx, mat_id in zip(sorted(material_indices.keys(), key=int), material_ids)
-            ]
-
+        # Create terrain mesh geometry
         return {
-            "terrain_material": {
-                "type": "selectbsdf",
-                "id": "terrain_material",
-                "indices": {
-                    "type": "bitmap",
-                    "raw": True,
-                    "filter_type": "nearest",
-                    "wrap_mode": "clamp",
-                    "data": selection_texture_data,
-                },
-                **{
-                    f"terrain_bsdf_{i:02d}": {"type": "ref", "id": f"_mat_{mat_id}"}
-                    for i, mat_id in enumerate(material_ids)
-                },
-            },
+            "terrain_material": material_dict,
             "terrain": {
                 "type": "ply",
                 "filename": str(target_mesh_path),
@@ -1743,46 +1937,19 @@ class EradiateBackend(SimulationBackend):
             else None
         )
 
-        with open_file(buffer_texture_path, "rb") as f:
-            buffer_texture_image = Image.open(f)
-            buffer_texture_image.load()
-        buffer_selection_texture_data = np.array(buffer_texture_image)
-        buffer_selection_texture_data = np.atleast_3d(buffer_selection_texture_data)
+        # Create selectbsdf material (common logic extracted)
+        _, _, material_dict = self._create_selectbsdf_material(
+            "buffer",
+            scene_description,
+            scene_dir,
+            buffer_texture_path,
+            hamster_available,
+        )
 
-        # Material region overrides are now applied by the generator during texture creation
-        # No need to modify texture here - it's already been modified
+        result = {"buffer_material": material_dict}
 
-        material_indices = scene_description.material_indices
-        material_ids = self._get_material_ids_from_scene(scene_description)
-
-        if hamster_available:
-            # Only apply HAMSTER suffix to base landcover materials (indices 0-10)
-            # Region materials (indices 11+) keep their original names
-            material_ids = [
-                f"{mat_id}_buffer" if int(idx) < 11 else mat_id
-                for idx, mat_id in zip(sorted(material_indices.keys(), key=int), material_ids)
-            ]
-
-        result = {
-            "buffer_material": {
-                "type": "selectbsdf",
-                "id": "buffer_material",
-                "indices": {
-                    "type": "bitmap",
-                    "raw": True,
-                    "filter_type": "nearest",
-                    "wrap_mode": "clamp",
-                    "data": buffer_selection_texture_data,
-                },
-                **{
-                    f"buffer_bsdf_{i:02d}": {"type": "ref", "id": f"_mat_{mat_id}"}
-                    for i, mat_id in enumerate(material_ids)
-                },
-            }
-        }
-
+        # Handle optional mask
         buffer_bsdf_id = "buffer_material"
-
         from s2gos_utils.io.paths import exists
 
         if mask_path and exists(mask_path):
@@ -1805,6 +1972,7 @@ class EradiateBackend(SimulationBackend):
             }
             buffer_bsdf_id = "buffer_mask"
 
+        # Create buffer mesh geometry
         result["buffer_terrain"] = {
             "type": "ply",
             "filename": str(buffer_mesh_path),
@@ -1823,65 +1991,33 @@ class EradiateBackend(SimulationBackend):
         """Create background surface from SceneDescription."""
         background_config = scene_description.background
         elevation = background_config["elevation"]
-        background_selection_texture_path = (
-            scene_dir / background_config["selection_texture"]
-        )
+        background_texture_path = scene_dir / background_config["selection_texture"]
         background_size_km = background_config["size_km"]
 
-        with open_file(background_selection_texture_path, "rb") as f:
-            background_texture_image = Image.open(f)
-            background_texture_image.load()
-        background_selection_texture_data = np.array(background_texture_image)
-        background_selection_texture_data = np.atleast_3d(
-            background_selection_texture_data
+        # Create selectbsdf material (common logic extracted)
+        _, _, material_dict = self._create_selectbsdf_material(
+            "background",
+            scene_description,
+            scene_dir,
+            background_texture_path,
+            hamster_available,
         )
 
-        # Material region overrides are now applied by the generator during texture creation
-        # No need to modify texture here - it's already been modified
-
-        material_indices = scene_description.material_indices
-        material_ids = self._get_material_ids_from_scene(scene_description)
-
-        if hamster_available:
-            # Only apply HAMSTER suffix to base landcover materials (indices 0-10)
-            # Region materials (indices 11+) keep their original names
-            material_ids = [
-                f"{mat_id}_background" if int(idx) < 11 else mat_id
-                for idx, mat_id in zip(sorted(material_indices.keys(), key=int), material_ids)
-            ]
-
-        result = {
-            "background_material": {
-                "type": "selectbsdf",
-                "id": "background_material",
-                "indices": {
-                    "type": "bitmap",
-                    "raw": True,
-                    "filter_type": "nearest",
-                    "wrap_mode": "clamp",
-                    "data": background_selection_texture_data,
-                },
-                **{
-                    f"background_bsdf_{i:02d}": {"type": "ref", "id": f"_mat_{mat_id}"}
-                    for i, mat_id in enumerate(material_ids)
-                },
-            }
-        }
-
+        # Create background rectangle geometry with transform
         scale_factor = (background_size_km * 1000) / 2.0
-
         to_world = mi.ScalarTransform4f.translate(
             [0, 0, elevation]
         ) @ mi.ScalarTransform4f.scale(scale_factor)
 
-        result["background_surface"] = {
-            "type": "rectangle",
-            "to_world": to_world,
-            "bsdf": {"type": "ref", "id": "background_material"},
-            "id": "background_surface",
+        return {
+            "background_material": material_dict,
+            "background_surface": {
+                "type": "rectangle",
+                "to_world": to_world,
+                "bsdf": {"type": "ref", "id": "background_material"},
+                "id": "background_surface",
+            },
         }
-
-        return result
 
     def _validate_material_ids(self, kdict: dict, scene_description=None) -> None:
         """Validate material IDs to prevent Eradiate parsing issues."""
