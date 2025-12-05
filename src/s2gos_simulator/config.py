@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List, Literal, Optional, Tuple, Union
+from typing import Annotated, Any, Dict, List, Literal, Optional, Tuple, Union
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 from s2gos_utils import validate_config_version
@@ -134,19 +134,7 @@ INSTRUMENT_BANDS = {
 }
 
 
-class MeasurementType(str, Enum):
-    """Radiative quantities that can be measured."""
-
-    BRF = "brf"  # Bidirectional Reflectance Factor
-    HDRF = "hdrf"  # Hemispherical-Directional Reflectance Factor
-    BHR = "bhr"  # Bi-Hemispherical Reflectance
-    BHR_ISO = "bhr_iso"  # Bi-Hemispherical Reflectance (isotropic)
-    FLUX_3D = "flux_3d"  # 3D flux distributions
-    RADIANCE = "radiance"  # Spectral radiance (instrument-specific)
-    IRRADIANCE = "irradiance"  # Spectral irradiance (generic)
-    BOA_IRRADIANCE = "boa_irradiance"  # Bottom-of-Atmosphere downward irradiance
-    DIGITAL_HEMISPHERICAL_PHOTOGRAPHY = "dhp"  # Digital Hemispherical Photography
-    FAPAR = "fapar"  # Fraction of Absorbed Photosynthetically Active Radiation
+# MeasurementType enum removed - replaced with discriminated union configs below
 
 
 class ProcessingLevel(str, Enum):
@@ -337,6 +325,14 @@ class AngularFromOriginViewing(BaseViewing):
     up: Optional[List[float]] = Field(
         [0, 0, 1], description="Up direction for cameras [x, y, z] (default Z-up)"
     )
+    terrain_relative_height: bool = Field(
+        default=False,
+        description=(
+            "If True, z-coordinate in origin is offset from terrain surface. "
+            "Backend will query DEM elevation at (x, y) and add z offset. "
+            "If False (default), z-coordinate is absolute elevation in scene coordinate system."
+        ),
+    )
 
 
 class LookAtViewing(BaseViewing):
@@ -357,6 +353,14 @@ class LookAtViewing(BaseViewing):
     up: Optional[List[float]] = Field(
         [0, 0, 1], description="Up direction for cameras [x, y, z] (default Z-up)"
     )
+    terrain_relative_height: bool = Field(
+        default=False,
+        description=(
+            "If True, z-coordinates in origin and target are offsets from terrain surface. "
+            "Backend will query DEM elevation at (x, y) and add z offset. "
+            "If False (default), z-coordinates are absolute elevations in scene coordinate system."
+        ),
+    )
 
 
 class HemisphericalViewing(BaseViewing):
@@ -372,154 +376,463 @@ class HemisphericalViewing(BaseViewing):
         True,
         description="True for upward-looking (sky), False for downward-looking (ground)",
     )
+    terrain_relative_height: bool = Field(
+        default=False,
+        description=(
+            "If True, z-coordinate in origin is offset from terrain surface. "
+            "Backend will query DEM elevation at (x, y) and add z offset. "
+            "If False (default), z-coordinate is absolute elevation in scene coordinate system."
+        ),
+    )
 
+
+# LocationBased class removed - was unused duplicate of HemisphericalMeasurementLocation
+# Use HemisphericalMeasurementLocation for location-based measurements instead
 
 ViewingType = Union[
-    AngularViewing, AngularFromOriginViewing, LookAtViewing, HemisphericalViewing
+    AngularViewing,
+    AngularFromOriginViewing,
+    LookAtViewing,
+    HemisphericalViewing,
+    # LocationBased removed - use HemisphericalMeasurementLocation for location-based measurements
 ]
 
 
-class RadiativeQuantityConfig(BaseModel):
-    """Configuration for radiative quantities independent of sensors."""
+class IrradianceConfig(BaseModel):
+    """Configuration for BOA irradiance measurement using white reference disk.
 
-    id: Optional[str] = Field(
-        None, description="Unique identifier for this radiative quantity measurement"
+    Measures downward hemispheric irradiance at bottom-of-atmosphere using the
+    white reference disk technique:
+    - Places a small white Lambertian disk (ρ=1.0) at the measurement location
+    - Measures upward radiance from the disk
+    - Converts to downward irradiance: E = π × L
+    - Averages samples to reduce Monte Carlo noise
+
+    This is the fundamental irradiance measurement used as reference for HDRF.
+    """
+
+    type: Literal["irradiance"] = "irradiance"
+    id: str = Field(description="Unique identifier for this irradiance measurement")
+    location: HemisphericalMeasurementLocation
+    samples_per_pixel: int = 512
+
+
+class BRFConfig(BaseModel):
+    """Configuration for Bidirectional Reflectance Factor (BRF) measurement.
+
+    BRF is the ratio of radiance reflected in a specific direction to that from
+    a perfect Lambertian reflector under the same illumination conditions.
+
+    Two modes:
+    1. Reference mode: Specify radiance_sensor_id + reference_radiance_sensor_id
+    2. Auto-generation mode: Specify viewing angles, backend creates sensors
+    """
+
+    type: Literal["brf"] = "brf"
+    id: Optional[str] = Field(None, description="Unique identifier")
+
+    # Mode 1: Reference existing sensors
+    radiance_sensor_id: Optional[str] = Field(
+        None, description="ID of sensor providing actual radiance measurement"
     )
-    quantity: MeasurementType = Field(
-        ..., description="Type of radiative quantity to calculate"
+    reference_radiance_sensor_id: Optional[str] = Field(
+        None, description="ID of sensor providing reference radiance (Lambertian disk)"
     )
-    srf: Optional[SRFType] = Field(None, description="Spectral response function")
+
+    # Mode 2: Auto-generation mode
     viewing_zenith: Optional[float] = Field(
-        None,
-        ge=0.0,
-        le=180.0,
-        description="Viewing zenith angle for directional quantities",
+        None, ge=0.0, le=180.0, description="Viewing zenith angle (auto-generation)"
     )
     viewing_azimuth: Optional[float] = Field(
-        None,
-        ge=0.0,
-        lt=360.0,
-        description="Viewing azimuth angle for directional quantities",
-    )
-    target_lat: float = (
-        Field(
-            0,
-            description="Viewing azimuth angle for directional quantities",
-        ),
-    )
-    target_lon: float = (
-        Field(
-            0,
-            description="Viewing azimuth angle for directional quantities",
-        ),
-    )
-    samples_per_pixel: int = Field(
-        64, ge=1, description="Number of samples per pixel for Monte Carlo calculations"
-    )
-    reference_panel_offset_m: Optional[float] = Field(
-        None,
-        ge=0.0,
-        description="Height offset above terrain for HDRF reference panel (accounts for vegetation height). Required for HDRF measurements.",
+        None, ge=0.0, lt=360.0, description="Viewing azimuth angle (auto-generation)"
     )
 
     @model_validator(mode="after")
-    def validate_quantity_config(self):
-        """Validate configuration based on quantity type."""
-        if self.quantity in [MeasurementType.BRF, MeasurementType.HDRF]:
-            if self.viewing_zenith is None or self.viewing_azimuth is None:
-                raise ValueError(
-                    f"{self.quantity} requires viewing_zenith and viewing_azimuth"
-                )
+    def validate_brf_mode(self):
+        """Validate that either sensor references OR viewing angles are provided."""
+        has_refs = (
+            self.radiance_sensor_id is not None
+            and self.reference_radiance_sensor_id is not None
+        )
+        has_autogen = (
+            self.viewing_zenith is not None and self.viewing_azimuth is not None
+        )
 
-        if self.quantity == MeasurementType.HDRF:
-            if self.reference_panel_offset_m is None:
-                raise ValueError(
-                    "HDRF measurements require explicit reference_panel_offset_m "
-                    "(height above terrain for reference panel placement)"
-                )
-            if self.target_lat is None or self.target_lon is None:
-                raise ValueError("HDRF measurements require target_lat and target_lon")
+        if has_refs and has_autogen:
+            raise ValueError(
+                "Specify either sensor references OR viewing angles, not both"
+            )
+
+        if not has_refs and not has_autogen:
+            raise ValueError(
+                "Must specify either references (radiance_sensor_id + reference_radiance_sensor_id) "
+                "OR auto-generation mode (viewing_zenith + viewing_azimuth)"
+            )
 
         return self
 
 
-class IrradianceMeasurementConfig(BaseModel):
-    """Configuration for BOA irradiance measurements at specific locations.
+class HDRFConfig(BaseModel):
+    """Configuration for Hemispherical-Directional Reflectance Factor (HDRF).
 
-    Uses the white reference disk technique to measure downward irradiance at BOA:
-    - Places a small white Lambertian disk (ρ=1.0) at the measurement location
-    - Measures radiance from the disk
-    - Converts to irradiance: E = π × L
-    - Averages multiple samples to reduce Monte Carlo noise
+    HDRF measures the ratio of radiance to BOA irradiance.
 
-    This is the same technique used for HDRF reference measurements, now
-    available as a standalone measurement for any location.
+    Two modes:
+    1. Reference mode: Specify radiance_sensor_id + irradiance_measurement_id
+    2. Auto-generation mode: Specify viewing geometry, backend creates sensor + measurement
     """
 
-    id: str = Field(
-        ..., description="Unique identifier for this irradiance measurement"
+    type: Literal["hdrf"] = "hdrf"
+    id: Optional[str] = Field(None, description="Unique identifier")
+
+    # Mode 1: Reference existing sensor + measurement
+    radiance_sensor_id: Optional[str] = Field(
+        None, description="ID of sensor providing radiance measurement"
     )
-    target_lat: float = Field(
-        ...,
-        description="Target latitude for irradiance measurement (WGS84 decimal degrees)",
+    irradiance_measurement_id: Optional[str] = Field(
+        None, description="ID of IrradianceConfig providing BOA irradiance"
     )
-    target_lon: float = Field(
-        ...,
-        description="Target longitude for irradiance measurement (WGS84 decimal degrees)",
+
+    # Mode 2: Auto-generation mode
+    instrument: Optional[Literal["radiancemeter", "hemispherical"]] = Field(
+        None, description="Instrument type for auto-generation"
     )
+    location: Optional[HemisphericalMeasurementLocation] = Field(
+        None, description="Location for hemispherical HDRF (auto-generation)"
+    )
+    viewing: Optional[Union[LookAtViewing, AngularFromOriginViewing]] = Field(
+        None, description="Viewing geometry for radiancemeter HDRF (auto-generation)"
+    )
+    reference_height_offset_m: Optional[float] = Field(
+        None,
+        description="Height offset for reference irradiance disk (auto-generation)",
+    )
+    srf: Optional[SRFType] = Field(None, description="SRF for auto-generated sensors")
+    samples_per_pixel: int = Field(
+        64, description="Samples per pixel for auto-generated sensors"
+    )
+    terrain_relative_height: bool = Field(
+        False, description="Terrain-relative height interpretation"
+    )
+
+    @model_validator(mode="after")
+    def validate_hdrf_mode(self):
+        """Validate that either sensor references OR auto-generation specs are provided."""
+        has_refs = (
+            self.radiance_sensor_id is not None
+            and self.irradiance_measurement_id is not None
+        )
+        has_autogen = self.instrument is not None
+
+        if has_refs and has_autogen:
+            raise ValueError(
+                "Specify either sensor/measurement references OR auto-generation mode, not both"
+            )
+
+        if not has_refs and not has_autogen:
+            raise ValueError(
+                "Must specify either references (radiance_sensor_id + irradiance_measurement_id) "
+                "OR auto-generation mode (instrument + location/viewing)"
+            )
+
+        # Validate auto-generation mode
+        if has_autogen:
+            if self.instrument == "hemispherical" and not self.location:
+                raise ValueError("instrument='hemispherical' requires 'location'")
+            if self.instrument == "radiancemeter" and not self.viewing:
+                raise ValueError("instrument='radiancemeter' requires 'viewing'")
+            if not self.reference_height_offset_m:
+                raise ValueError(
+                    "Auto-generation mode requires 'reference_height_offset_m'"
+                )
+
+        return self
+
+
+class HCRFPostProcessingConfig(BaseModel):
+    """Post-processing configuration for HCRF measurements.
+
+    HCRF produces images (wavelength × x_index × y_index) which can be
+    post-processed in various ways before final analysis.
+    """
+
+    # Spectral response function convolution
+    apply_srf_convolution: bool = Field(
+        False,
+        description="Apply Gaussian SRF convolution to spectral data",
+    )
+    srf_fwhm_nm: Optional[float] = Field(
+        None,
+        gt=0.0,
+        description="Full Width at Half Maximum for Gaussian SRF (nm). Common values: HYPSTAR VNIR=3.0, SWIR=10.0",
+    )
+
+    # Spatial averaging over FOV
+    compute_spatial_average: bool = Field(
+        True,
+        description="Average HCRF values over spatial dimensions (FOV pixels)",
+    )
+    spatial_statistic: Literal["mean", "median"] = Field(
+        "mean",
+        description="Statistic to use for spatial averaging",
+    )
+
+    # RGB visualization
+    create_rgb_image: bool = Field(
+        False,
+        description="Generate RGB image from spectral data",
+    )
+    rgb_wavelengths_nm: Tuple[float, float, float] = Field(
+        (660.0, 550.0, 440.0),
+        description="Wavelengths (nm) to use for RGB channels [R, G, B]",
+    )
+    rgb_scaling_factors: Tuple[float, float, float] = Field(
+        (1.0, 1.0, 1.0),
+        description="Scaling factors for RGB channels",
+    )
+
+
+class HCRFConfig(BaseModel):
+    """Configuration for Hemispherical-Conical Reflectance Factor (HCRF).
+
+    HCRF is a **purely ideal, theoretical measurement** that captures the ratio
+    of radiance within a conical field of view to BOA irradiance.
+
+    Two modes:
+    1. Reference mode: Specify radiance_sensor_id + irradiance_measurement_id
+    2. Auto-generation mode: Specify camera geometry, backend creates sensor + measurement
+    """
+
+    type: Literal["hcrf"] = "hcrf"
+    id: Optional[str] = Field(None, description="Unique identifier")
+
+    # Mode 1: Reference existing sensor + measurement
+    radiance_sensor_id: Optional[str] = Field(
+        None,
+        description="ID of camera sensor providing conical radiance (must have FOV)",
+    )
+    irradiance_measurement_id: Optional[str] = Field(
+        None, description="ID of IrradianceConfig providing BOA irradiance"
+    )
+
+    # Mode 2: Auto-generation mode
+    platform_type: Optional[Literal["ground", "uav"]] = Field(
+        None, description="Platform type for auto-generated camera"
+    )
+    viewing: Optional[Union[LookAtViewing, AngularFromOriginViewing]] = Field(
+        None, description="Camera viewing geometry (auto-generation)"
+    )
+    fov: Optional[float] = Field(
+        None, gt=0.0, le=180.0, description="Camera field of view (auto-generation)"
+    )
+    film_resolution: Optional[Tuple[int, int]] = Field(
+        None, description="Camera resolution (auto-generation)"
+    )
+    reference_height_offset_m: Optional[float] = Field(
+        None,
+        description="Height offset for reference irradiance disk (auto-generation)",
+    )
+    samples_per_pixel: int = Field(64, description="Samples per pixel")
+    terrain_relative_height: bool = Field(False, description="Terrain-relative height")
+    post_processing: Optional[HCRFPostProcessingConfig] = Field(
+        None, description="Post-processing configuration"
+    )
+
+    @model_validator(mode="after")
+    def validate_hcrf_mode(self):
+        """Validate that either sensor references OR auto-generation specs are provided."""
+        has_refs = (
+            self.radiance_sensor_id is not None
+            and self.irradiance_measurement_id is not None
+        )
+        has_autogen = self.viewing is not None and self.fov is not None
+
+        if has_refs and has_autogen:
+            raise ValueError(
+                "Specify either references OR auto-generation mode, not both"
+            )
+
+        if not has_refs and not has_autogen:
+            raise ValueError(
+                "Must specify either references (radiance_sensor_id + irradiance_measurement_id) "
+                "OR auto-generation mode (viewing + fov)"
+            )
+
+        # Validate auto-generation mode
+        if has_autogen:
+            if not self.platform_type:
+                raise ValueError("Auto-generation mode requires 'platform_type'")
+            if not self.film_resolution:
+                raise ValueError("Auto-generation mode requires 'film_resolution'")
+            if self.reference_height_offset_m is None:
+                raise ValueError(
+                    "Auto-generation mode requires 'reference_height_offset_m'"
+                )
+
+        return self
+
+
+class HemisphericalMeasurementLocation(BaseModel):
+    """Location specification for hemispheric measurements.
+
+    Used when measuring at a point with hemispherical integration
+    (e.g., BOA irradiance, polar HDRF). Specifies target location
+    using either geographic (lat/lon) or scene (x/y/z) coordinates.
+
+    This class provides the location where a hemispheric measurement
+    is performed, typically for measurements that integrate over all
+    directions (hemisphere) at a specific point in space.
+    """
+
+    # Target location (EITHER lat/lon OR x/y/z, not both)
+    target_lat: Optional[float] = Field(
+        None,
+        ge=-90.0,
+        le=90.0,
+        description="Target latitude in decimal degrees (WGS84)",
+    )
+    target_lon: Optional[float] = Field(
+        None,
+        ge=-180.0,
+        le=180.0,
+        description="Target longitude in decimal degrees (WGS84)",
+    )
+
+    target_x: Optional[float] = Field(
+        None,
+        description="Target X coordinate in scene coordinate system (meters)",
+    )
+    target_y: Optional[float] = Field(
+        None,
+        description="Target Y coordinate in scene coordinate system (meters)",
+    )
+    target_z: Optional[float] = Field(
+        None,
+        description="Target Z coordinate in scene coordinate system (meters)",
+    )
+
+    # Measurement parameters
+    samples_per_pixel: int = Field(
+        64,
+        ge=1,
+        description="Number of samples per pixel for Monte Carlo integration",
+    )
+    srf: Optional[SRFType] = Field(
+        None,
+        description="Spectral response function",
+    )
+
+    # Height offset (for terrain-relative measurements)
     height_offset_m: float = Field(
         0.0,
         ge=0.0,
-        description="Height above terrain for measurement (accounts for vegetation/sensor height)",
+        description="Height offset above terrain surface (meters)",
     )
-    srf: Optional[SRFType] = Field(
-        None, description="Spectral response function for irradiance measurement"
-    )
-    samples_per_pixel: int = Field(
-        512,
-        ge=1,
-        description="Number of samples per pixel for Monte Carlo calculations (higher = less noise)",
+    terrain_relative_height: bool = Field(
+        True,
+        description="If True, z-coordinates are interpreted as offsets from terrain elevation",
     )
 
     @model_validator(mode="after")
-    def validate_irradiance_config(self):
-        """Validate irradiance measurement configuration."""
-        import logging
+    def validate_coordinates(self) -> "HemisphericalMeasurementLocation":
+        """Validate that either geographic or Cartesian coordinates are provided.
 
-        logger = logging.getLogger(__name__)
+        Ensures:
+        - Either lat/lon OR x/y/z are fully specified (not both)
+        - No partial coordinate specifications
+        """
+        geo_present = self.target_lat is not None and self.target_lon is not None
+        cartesian_present = (
+            self.target_x is not None
+            and self.target_y is not None
+            and self.target_z is not None
+        )
 
-        # Validate lat/lon ranges
-        if not -90 <= self.target_lat <= 90:
+        any_geo = self.target_lat is not None or self.target_lon is not None
+        if any_geo and not geo_present:
             raise ValueError(
-                f"target_lat must be in range [-90, 90], got {self.target_lat}"
+                "If using geographic coordinates, both 'target_lat' and 'target_lon' are required"
             )
-        if not -180 <= self.target_lon <= 180:
+
+        any_cartesian = (
+            self.target_x is not None
+            or self.target_y is not None
+            or self.target_z is not None
+        )
+        if any_cartesian and not cartesian_present:
             raise ValueError(
-                f"target_lon must be in range [-180, 180], got {self.target_lon}"
+                "If using Cartesian coordinates, 'target_x', 'target_y', and 'target_z' are all required"
             )
 
-        # Validate height offset
-        if self.height_offset_m < 0:
+        if geo_present and cartesian_present:
             raise ValueError(
-                f"height_offset_m must be >= 0, got {self.height_offset_m}. "
-                "Negative heights (underground) are not physical."
+                "Cannot specify both geographic (lat/lon) and Cartesian (x/y/z) coordinates"
             )
 
-        # Warning for large height offsets
-        if self.height_offset_m > 100:
-            logger.warning(
-                f"Large height_offset_m ({self.height_offset_m}m) detected for '{self.id}'. "
-                "Ensure this is intentional - typical ground sensors are <50m."
+        if not geo_present and not cartesian_present:
+            raise ValueError(
+                "Must specify either geographic (lat/lon) or Cartesian (x/y/z) coordinates"
             )
 
-        # Validate samples_per_pixel
-        if self.samples_per_pixel < 32:
-            logger.warning(
-                f"Low samples_per_pixel ({self.samples_per_pixel}) for '{self.id}'. "
-                "Recommend >= 128 for acceptable noise levels, >= 512 for low noise."
+        # Geographic mode: must have terrain_relative_height=True
+        # (geographic coords don't provide absolute elevation, only lat/lon)
+        if geo_present and not self.terrain_relative_height:
+            raise ValueError(
+                "When using geographic coordinates (lat/lon), terrain_relative_height must be True. "
+                "Geographic coordinates require terrain elevation query to determine absolute height."
             )
+
+        # Cartesian mode with absolute coordinates: ensure target_z is meaningful
+        if cartesian_present and not self.terrain_relative_height:
+            # target_z will be used as absolute elevation
+            # (No additional validation needed - existing checks ensure target_z is present)
+            pass
 
         return self
+
+
+class RadianceConfig(HemisphericalMeasurementLocation):
+    """Configuration for simple spectral radiance measurement.
+
+    Measures upward radiance at a specific location without normalization.
+    """
+
+    type: Literal["radiance"] = "radiance"
+    id: Optional[str] = Field(
+        None,
+        description="Unique identifier",
+    )
+
+
+class BHRConfig(HemisphericalMeasurementLocation):
+    """Configuration for Bi-Hemispherical Reflectance (BHR) measurement.
+
+    BHR integrates reflectance over all viewing and illumination directions.
+    """
+
+    type: Literal["bhr"] = "bhr"
+    id: Optional[str] = Field(
+        None,
+        description="Unique identifier",
+    )
+    integration_mode: Literal["full", "isotropic"] = Field(
+        default="full",
+        description="Integration mode: 'full' for complete integration, 'isotropic' for isotropic assumption",
+    )
+
+
+# Union type with discriminator for type-safe measurement configs
+MeasurementConfig = Annotated[
+    Union[
+        IrradianceConfig,
+        BRFConfig,
+        HDRFConfig,  # Now supports multiple instruments (radiancemeter, perspective, hemispherical)
+        HCRFConfig,  # Hemispherical-Conical Reflectance Factor (camera FOV)
+        RadianceConfig,
+        BHRConfig,
+    ],
+    Field(discriminator="type"),
+]
 
 
 class BaseSensor(BaseModel):
@@ -531,8 +844,8 @@ class BaseSensor(BaseModel):
     platform_type: PlatformType
     viewing: ViewingType
     srf: Optional[SRFType] = Field(None, description="Spectral response function")
-    produces: List[MeasurementType] = Field(
-        [MeasurementType.RADIANCE],
+    produces: List[Literal["radiance", "irradiance", "hdrf", "brf", "bhr"]] = Field(
+        ["radiance"],
         description="List of radiative quantities to be produced by this sensor configuration",
     )
     samples_per_pixel: int = Field(64, ge=1)
@@ -687,6 +1000,129 @@ class UAVSensor(BaseSensor):
         return self
 
 
+class SRFPostProcessingConfig(BaseModel):
+    """Base configuration for Gaussian SRF post-processing.
+
+    This provides a common pattern for instruments that need
+    post-processing SRF application (e.g., HYPSTAR, other spectrometers).
+
+    Instruments can specify either:
+    - Wavelength-dependent FWHM (vnir + swir) for different spectral ranges
+    - Single FWHM for all wavelengths
+
+    Example:
+        # Wavelength-dependent (HYPSTAR-like)
+        config = SRFPostProcessingConfig(
+            apply_srf=True,
+            fwhm_vnir_nm=3.0,
+            fwhm_swir_nm=10.0
+        )
+
+        # Single FWHM (simpler instruments)
+        config = SRFPostProcessingConfig(
+            apply_srf=True,
+            fwhm_nm=5.0
+        )
+    """
+
+    apply_srf: bool = Field(default=True, description="Apply Gaussian SRF convolution")
+
+    # Option 1: Wavelength-dependent FWHM (like HYPSTAR)
+    fwhm_vnir_nm: Optional[float] = Field(
+        default=None, gt=0.0, description="FWHM for VNIR range (<1000 nm) in nanometers"
+    )
+    fwhm_swir_nm: Optional[float] = Field(
+        default=None,
+        gt=0.0,
+        description="FWHM for SWIR range (>=1000 nm) in nanometers",
+    )
+
+    # Option 2: Single FWHM for all wavelengths
+    fwhm_nm: Optional[float] = Field(
+        default=None,
+        gt=0.0,
+        description="Single FWHM for all wavelengths in nanometers",
+    )
+
+    spatial_averaging: bool = Field(
+        default=True, description="Average over spatial dimensions (x_index, y_index)"
+    )
+    spatial_statistic: Literal["mean", "median"] = Field(
+        default="mean", description="Statistic for spatial averaging"
+    )
+
+    @model_validator(mode="after")
+    def validate_fwhm(self):
+        """Ensure at least one FWHM is specified when SRF is enabled."""
+        if not self.apply_srf:
+            return self
+
+        has_dual = self.fwhm_vnir_nm is not None and self.fwhm_swir_nm is not None
+        has_single = self.fwhm_nm is not None
+
+        if not (has_dual or has_single):
+            raise ValueError(
+                "Must specify either (fwhm_vnir_nm + fwhm_swir_nm) or fwhm_nm when apply_srf=True"
+            )
+
+        if has_dual and has_single:
+            raise ValueError(
+                "Specify either dual FWHM (vnir+swir) OR single FWHM, not both"
+            )
+
+        return self
+
+
+class HypstarPostProcessingConfig(SRFPostProcessingConfig):
+    """Post-processing configuration for HYPSTAR sensor.
+
+    HYPSTAR is a real instrument with specific spectral characteristics.
+    This configuration inherits from SRFPostProcessingConfig and provides
+    HYPSTAR-specific defaults for SRF convolution.
+
+    For validation against real HYPSTAR observations, specify real_reference_file
+    to interpolate simulation results to HYPSTAR's exact wavelength grid.
+
+    Default HYPSTAR characteristics:
+    - VNIR FWHM: 3.0 nm (wavelength < 1000 nm)
+    - SWIR FWHM: 10.0 nm (wavelength >= 1000 nm)
+    - Spatial averaging: enabled
+
+    Example:
+        # Basic usage (simulation wavelengths)
+        config = HypstarPostProcessingConfig()
+
+        # Validation mode (interpolate to L2A wavelengths)
+        config = HypstarPostProcessingConfig(
+            real_reference_file="HYPERNETS_L_GHNA_L2A_REF_*.nc"
+        )
+    """
+
+    # Override defaults for HYPSTAR instrument
+    fwhm_vnir_nm: float = Field(
+        default=3.0, gt=0.0, description="HYPSTAR VNIR FWHM (default 3.0 nm)"
+    )
+    fwhm_swir_nm: float = Field(
+        default=10.0, gt=0.0, description="HYPSTAR SWIR FWHM (default 10.0 nm)"
+    )
+
+    # L2A reference for wavelength interpolation
+    real_reference_file: Optional[str] = Field(
+        default=None,
+        description=(
+            "Path to HYPSTAR L2A NetCDF file for wavelength grid reference. "
+            "If provided, SRF processing will interpolate to the L2A wavelengths "
+            "instead of simulation wavelengths. This is required for validation "
+            "against real HYPSTAR observations to ensure wavelength grids match. "
+            "Example: 'HYPERNETS_L_GHNA_L2A_REF_20220517T0743_*.nc'"
+        ),
+    )
+    wavelength_variable: str = Field(
+        default="wavelength",
+        description="Variable name for wavelengths in L2A reference file",
+    )
+
+
 class GroundInstrumentType(str, Enum):
     """Enum for ground instrument types for robustness."""
 
@@ -717,6 +1153,10 @@ class GroundSensor(BaseSensor):
         "For AngularFromOriginViewing, only origin z-coordinate is terrain-relative. "
         "If False (default), all z-coordinates are absolute elevations.",
     )
+    hypstar_post_processing: Optional[HypstarPostProcessingConfig] = Field(
+        None,
+        description="HYPSTAR-specific post-processing (auto-enabled for HYPSTAR instrument)",
+    )
 
     @model_validator(mode="after")
     def set_defaults_and_validate(self):
@@ -738,6 +1178,10 @@ class GroundSensor(BaseSensor):
                         f"Warning: HYPSTAR sensor '{self.id or 'unnamed'}' does not have 'fov' "
                         f"and/or 'resolution' specified. Using defaults: fov=5.0°, resolution=[5, 5]"
                     )
+
+                # Auto-enable HYPSTAR post-processing
+                if self.hypstar_post_processing is None:
+                    self.hypstar_post_processing = HypstarPostProcessingConfig()
 
         elif self.instrument in [
             GroundInstrumentType.PYRANOMETER,
@@ -823,52 +1267,6 @@ def create_custom_satellite_sensor(
     )
 
 
-def create_uav_sensor(
-    camera_type: str,
-    altitude: float = 100.0,
-    origin: Optional[List[float]] = None,
-    target: Optional[List[float]] = None,
-    **kwargs,
-) -> UAVSensor:
-    """Create a UAV sensor with flexible positioning.
-
-    Args:
-        camera_type: Camera type (e.g., "RGB", "hyperspectral")
-        origin: UAV position [x, y, z] in meters (defaults to [0, 0, altitude])
-        target: Target position [x, y, z] in meters (defaults to [0, 0, 0])
-        **kwargs: Additional sensor parameters (zenith, azimuth, fov, resolution, etc.)
-
-    Returns:
-        UAVSensor configured with the specified parameters
-    """
-    return UAVSensor(camera_type=camera_type, origin=origin, target=target, **kwargs)
-
-
-def create_ground_sensor(
-    instrument: str,
-    height: float = 2.0,
-    position: Optional[List[float]] = None,
-    **kwargs,
-) -> GroundSensor:
-    """Create a ground-based sensor with flexible viewing.
-
-    Args:
-        instrument: Instrument identifier (e.g., "HYPSTAR", "pyranometer", "flux_meter", "perspective_camera")
-        height: Height above ground in meters
-        position: 3D position [x, y, z] in meters (defaults to [0, 0, height])
-        **kwargs: Additional sensor parameters (upward_looking, target, zenith, azimuth, hemispherical, etc.)
-
-    Returns:
-        GroundSensor configured with the specified parameters
-    """
-    if position is None:
-        position = [0.0, 0.0, height]
-
-    return GroundSensor(
-        instrument=instrument, height=height, position=position, **kwargs
-    )
-
-
 class SimulationConfig(BaseModel):
     """
     Comprehensive simulation configuration containing everything needed to run a simulation.
@@ -895,13 +1293,9 @@ class SimulationConfig(BaseModel):
     sensors: List[Union[SatelliteSensor, UAVSensor, GroundSensor]] = Field(
         default_factory=list, description="List of sensors to simulate"
     )
-    radiative_quantities: List[RadiativeQuantityConfig] = Field(
+    measurements: List[MeasurementConfig] = Field(
         default_factory=list,
-        description="List of radiative quantities to calculate independently",
-    )
-    irradiance_measurements: List[IrradianceMeasurementConfig] = Field(
-        default_factory=list,
-        description="List of BOA irradiance measurements at specific locations",
+        description="Unified list of radiative quantity measurements (HDRF, BRF, irradiance, etc.)",
     )
 
     # Processing configuration
@@ -940,13 +1334,186 @@ class SimulationConfig(BaseModel):
     @model_validator(mode="after")
     def validate_simulation_config(self):
         """Validate simulation configuration."""
-        if (
-            not self.sensors
-            and not self.radiative_quantities
-            and not self.irradiance_measurements
-        ):
+        if not self.sensors and not self.measurements:
+            raise ValueError("At least one sensor or measurement must be specified")
+
+        self._validate_measurement_references()
+        self._validate_sensor_references()
+
+        return self
+
+    def _validate_measurement_references(self):
+        """Validate cross-references between measurements.
+
+        Ensures that:
+        - Measurement IDs are unique
+        - reference_irradiance_id references an existing measurement
+        - The referenced measurement is an IrradianceConfig
+        """
+        measurement_ids = set()
+        irradiance_ids = set()
+
+        for measurement in self.measurements:
+            m_id = getattr(measurement, "id", None)
+            if m_id:
+                if m_id in measurement_ids:
+                    raise ValueError(f"Duplicate measurement ID: '{m_id}'")
+                measurement_ids.add(m_id)
+
+                if isinstance(measurement, IrradianceConfig):
+                    irradiance_ids.add(m_id)
+
+        errors = []
+        for measurement in self.measurements:
+            ref_id = getattr(measurement, "irradiance_measurement_id", None)
+            if ref_id is not None:
+                m_id = getattr(measurement, "id", "unknown")
+
+                if ref_id not in measurement_ids:
+                    errors.append(
+                        f"Measurement '{m_id}' references unknown measurement "
+                        f"'{ref_id}' as irradiance_measurement_id"
+                    )
+                elif ref_id not in irradiance_ids:
+                    errors.append(
+                        f"Measurement '{m_id}' references '{ref_id}' as irradiance, "
+                        f"but it is not an IrradianceConfig"
+                    )
+
+        if errors:
             raise ValueError(
-                "At least one sensor, radiative quantity, or irradiance measurement must be specified"
+                "Configuration validation failed:\n  - " + "\n  - ".join(errors)
+            )
+
+    def _validate_sensor_references(self):
+        """Validate that measurements reference existing sensors and measurements."""
+        sensor_ids = {s.id for s in self.sensors}
+        measurement_ids = {
+            getattr(m, "id", None) for m in self.measurements if getattr(m, "id", None)
+        }
+
+        errors = []
+        for measurement in self.measurements:
+            # Check HDRF references
+            if isinstance(measurement, HDRFConfig):
+                if measurement.radiance_sensor_id:
+                    if measurement.radiance_sensor_id not in sensor_ids:
+                        errors.append(
+                            f"HDRF '{measurement.id}' references unknown sensor "
+                            f"'{measurement.radiance_sensor_id}'"
+                        )
+                if measurement.irradiance_measurement_id:
+                    if measurement.irradiance_measurement_id not in measurement_ids:
+                        errors.append(
+                            f"HDRF '{measurement.id}' references unknown measurement "
+                            f"'{measurement.irradiance_measurement_id}'"
+                        )
+                    # Validate that referenced measurement is IrradianceConfig
+                    ref_measurement = next(
+                        (
+                            m
+                            for m in self.measurements
+                            if getattr(m, "id", None)
+                            == measurement.irradiance_measurement_id
+                        ),
+                        None,
+                    )
+                    if ref_measurement and not isinstance(
+                        ref_measurement, IrradianceConfig
+                    ):
+                        errors.append(
+                            f"HDRF '{measurement.id}' references '{measurement.irradiance_measurement_id}' "
+                            f"as irradiance, but it is not an IrradianceConfig"
+                        )
+
+            # Check HCRF references
+            if isinstance(measurement, HCRFConfig):
+                if measurement.radiance_sensor_id:
+                    if measurement.radiance_sensor_id not in sensor_ids:
+                        errors.append(
+                            f"HCRF '{measurement.id}' references unknown sensor "
+                            f"'{measurement.radiance_sensor_id}'"
+                        )
+                    # Validate that referenced sensor has FOV (is a camera)
+                    sensor = self.get_sensor(measurement.radiance_sensor_id)
+                    if sensor and not hasattr(sensor, "fov"):
+                        errors.append(
+                            f"HCRF '{measurement.id}' references sensor "
+                            f"'{measurement.radiance_sensor_id}' which is not a camera (no FOV)"
+                        )
+                if measurement.irradiance_measurement_id:
+                    if measurement.irradiance_measurement_id not in measurement_ids:
+                        errors.append(
+                            f"HCRF '{measurement.id}' references unknown measurement "
+                            f"'{measurement.irradiance_measurement_id}'"
+                        )
+                    # Validate it's IrradianceConfig
+                    ref_measurement = next(
+                        (
+                            m
+                            for m in self.measurements
+                            if getattr(m, "id", None)
+                            == measurement.irradiance_measurement_id
+                        ),
+                        None,
+                    )
+                    if ref_measurement and not isinstance(
+                        ref_measurement, IrradianceConfig
+                    ):
+                        errors.append(
+                            f"HCRF '{measurement.id}' references '{measurement.irradiance_measurement_id}' "
+                            f"as irradiance, but it is not an IrradianceConfig"
+                        )
+
+            # Check BRF sensor references
+            if isinstance(measurement, BRFConfig):
+                if measurement.radiance_sensor_id:
+                    if measurement.radiance_sensor_id not in sensor_ids:
+                        errors.append(
+                            f"BRF '{measurement.id}' references unknown sensor "
+                            f"'{measurement.radiance_sensor_id}'"
+                        )
+                if measurement.reference_radiance_sensor_id:
+                    if measurement.reference_radiance_sensor_id not in sensor_ids:
+                        errors.append(
+                            f"BRF '{measurement.id}' references unknown sensor "
+                            f"'{measurement.reference_radiance_sensor_id}'"
+                        )
+
+        if errors:
+            raise ValueError(
+                "Sensor reference validation failed:\n  - " + "\n  - ".join(errors)
+            )
+
+    @model_validator(mode="after")
+    def validate_hdrf_hcrf_requires_irradiance(self):
+        """Validate that HDRF/HCRF measurements have corresponding irradiance measurements.
+
+        In reference mode, HDRF/HCRF must reference an existing IrradianceConfig.
+        In auto-generation mode, the backend will create the irradiance measurement automatically.
+        """
+        # Get all irradiance measurement IDs
+        irradiance_ids = {
+            m.id for m in self.measurements if isinstance(m, IrradianceConfig)
+        }
+
+        errors = []
+        for measurement in self.measurements:
+            if isinstance(measurement, (HDRFConfig, HCRFConfig)):
+                # In reference mode, must reference existing irradiance measurement
+                if measurement.irradiance_measurement_id:
+                    if measurement.irradiance_measurement_id not in irradiance_ids:
+                        errors.append(
+                            f"{measurement.__class__.__name__} '{measurement.id}' references "
+                            f"irradiance_measurement_id='{measurement.irradiance_measurement_id}' "
+                            f"which doesn't exist. Available: {sorted(irradiance_ids) if irradiance_ids else 'none'}"
+                        )
+                # In auto-gen mode, backend will create irradiance measurement
+                # (no validation needed here, as it happens during backend execution)
+
+        if errors:
+            raise ValueError(
+                "HDRF/HCRF validation failed:\n  - " + "\n  - ".join(errors)
             )
 
         return self
@@ -1023,7 +1590,7 @@ class SimulationConfig(BaseModel):
         return oblique_sensors
 
     def get_sensors_by_measurement(
-        self, measurement: MeasurementType
+        self, measurement: str
     ) -> List[Union[SatelliteSensor, UAVSensor, GroundSensor]]:
         """Get all sensors for a specific measurement type."""
         matching_sensors = []
@@ -1033,7 +1600,7 @@ class SimulationConfig(BaseModel):
         return matching_sensors
 
     @property
-    def output_quantities(self) -> List[MeasurementType]:
+    def output_quantities(self) -> List[str]:
         """Get output quantities based on sensors."""
         # In the new system, sensors specify what they produce in the 'produces' field
         quantities = []
@@ -1042,7 +1609,7 @@ class SimulationConfig(BaseModel):
                 quantities.extend(sensor.produces)
             else:
                 # Default to radiance for all sensors
-                quantities.append(MeasurementType.RADIANCE)
+                quantities.append("radiance")
         return list(set(quantities))
 
     @property

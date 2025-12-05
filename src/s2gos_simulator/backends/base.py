@@ -73,9 +73,9 @@ class SimulationBackend(ABC):
 
         # Generic validation - can be overridden by specific backends
         if not self.simulation_config.sensors and not getattr(
-            self.simulation_config, "radiative_quantities", []
+            self.simulation_config, "measurements", []
         ):
-            errors.append("No sensors or radiative quantities defined in configuration")
+            errors.append("No sensors or measurements defined in configuration")
 
         # Check if backend supports all requested measurement types
         unsupported_measurements = self._get_unsupported_measurements()
@@ -132,14 +132,14 @@ class SimulationBackend(ABC):
         # Default implementation - override in specific backends
         measures = [sensor.model_dump() for sensor in self.simulation_config.sensors]
 
-        # Add basic radiative quantity handling if present
-        if hasattr(self.simulation_config, "radiative_quantities"):
-            for rq in self.simulation_config.radiative_quantities:
+        # Add basic measurement handling if present
+        if hasattr(self.simulation_config, "measurements"):
+            for measurement in self.simulation_config.measurements:
                 measures.append(
                     {
-                        "id": f"{rq.quantity.value}_measure",
+                        "id": getattr(measurement, "id", f"{measurement.type}_measure"),
                         "type": "placeholder",
-                        "radiative_quantity": rq.quantity.value,
+                        "measurement_type": measurement.type,
                         "TODO": "Implement in specific backend",
                     }
                 )
@@ -162,8 +162,8 @@ class SimulationBackend(ABC):
             "backend": self.name,
             "created_at": self.simulation_config.created_at.isoformat(),
             "sensor_count": len(self.simulation_config.sensors),
-            "radiative_quantity_count": len(
-                getattr(self.simulation_config, "radiative_quantities", [])
+            "measurement_count": len(
+                getattr(self.simulation_config, "measurements", [])
             ),
             "measurement_types": [
                 mt.value for mt in self.simulation_config.output_quantities
