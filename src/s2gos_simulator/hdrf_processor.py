@@ -1,5 +1,4 @@
 import logging
-from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 import xarray as xr
@@ -7,6 +6,7 @@ from s2gos_utils.scene import SceneDescription
 from upath import UPath
 
 from .irradiance_processor import IrradianceProcessor
+from .processors import find_wavelength_coord
 
 logger = logging.getLogger(__name__)
 
@@ -25,15 +25,16 @@ class HDRFProcessor:
         Returns:
             True if HDRF computation is needed
         """
-        from .config import MeasurementType
+        from .config import HDRFConfig
 
+        # Check if any sensor produces HDRF
         for sensor in self.simulation_config.sensors:
-            if hasattr(sensor, "produces"):
-                if MeasurementType.HDRF in sensor.produces:
-                    return True
+            if hasattr(sensor, "produces") and "hdrf" in sensor.produces:
+                return True
 
-        for rq in self.simulation_config.radiative_quantities:
-            if rq.quantity == MeasurementType.HDRF:
+        # Check if any measurement is an HDRF config
+        for measurement in self.simulation_config.measurements:
+            if isinstance(measurement, HDRFConfig):
                 return True
 
         return False
@@ -44,26 +45,37 @@ class HDRFProcessor:
         Returns:
             List of measure IDs that require HDRF computation
         """
-        from .config import MeasurementType
+        from .config import HDRFConfig
 
         hdrf_ids = []
 
+        # Check sensors that produce HDRF
         for sensor in self.simulation_config.sensors:
-            if hasattr(sensor, "produces"):
-                if MeasurementType.HDRF in sensor.produces:
-                    hdrf_ids.append(sensor.id)
+            if hasattr(sensor, "produces") and "hdrf" in sensor.produces:
+                hdrf_ids.append(sensor.id)
 
-        for rq in self.simulation_config.radiative_quantities:
-            if rq.quantity == MeasurementType.HDRF:
-                if rq.id:
-                    rq_id = rq.id
-                else:
-                    string_viewing_zenith = str(rq.viewing_zenith).replace(".", "_")
-                    string_viewing_azimuth = str(rq.viewing_azimuth).replace(".", "_")
-                    rq_id = f"hdrf_{string_viewing_zenith}__{string_viewing_azimuth}"
-                hdrf_ids.append(rq_id)
+        # Check HDRF measurement configs
+        for measurement in self.simulation_config.measurements:
+            if isinstance(measurement, HDRFConfig):
+                hdrf_id = self._get_hdrf_id(measurement)
+                hdrf_ids.append(hdrf_id)
 
         return [x.replace(".", "_") for x in hdrf_ids]
+
+    def _get_hdrf_id(self, measurement) -> str:
+        """Generate ID for an HDRF measurement.
+
+        Args:
+            measurement: HDRFConfig instance
+
+        Returns:
+            ID string for the measurement
+        """
+        if measurement.id:
+            return measurement.id
+
+        # Auto-generate ID from instrument type
+        return f"hdrf_{measurement.instrument}"
 
     def _get_hdrf_config_for_measure(
         self, measure_id: str
@@ -74,36 +86,38 @@ class HDRFProcessor:
             measure_id: HDRF measure ID
 
         Returns:
-            Tuple of (target_lat, target_lon, height_offset_m) or None if not found
+            Tuple of (target_lat, target_lon, height_offset_m) or None if not found.
+            Returns (None, None, height_offset) if location uses scene coordinates
+            instead of lat/lon.
         """
-        from .config import MeasurementType
+        from .config import HDRFConfig
 
-        for sensor in self.simulation_config.sensors:
-            if hasattr(sensor, "produces") and MeasurementType.HDRF in sensor.produces:
-                if sensor.id == measure_id or sensor.id.replace(".", "_") == measure_id:
-                    if hasattr(sensor, "target_center_lat") and hasattr(
-                        sensor, "reference_panel_offset_m"
+        for measurement in self.simulation_config.measurements:
+            if isinstance(measurement, HDRFConfig):
+                hdrf_id = self._get_hdrf_id(measurement)
+
+                if hdrf_id.replace(".", "_") == measure_id:
+                    # Extract location based on instrument type
+                    target_lat = None
+                    target_lon = None
+
+                    if (
+                        measurement.instrument == "hemispherical"
+                        and measurement.location
                     ):
-                        return (
-                            sensor.target_center_lat,
-                            sensor.target_center_lon,
-                            sensor.reference_panel_offset_m,
-                        )
+                        # Hemispherical HDRF uses location-based pattern
+                        target_lat = measurement.location.target_lat
+                        target_lon = measurement.location.target_lon
+                    elif measurement.viewing:
+                        # Radiancemeter uses viewing geometry - try to get target lat/lon
+                        # Note: viewing.target is in scene coordinates, not lat/lon
+                        # We'll return None and let caller fall back to scene center
+                        pass
 
-        for rq in self.simulation_config.radiative_quantities:
-            if rq.quantity == MeasurementType.HDRF:
-                if rq.id:
-                    rq_id = rq.id
-                else:
-                    string_viewing_zenith = str(rq.viewing_zenith).replace(".", "_")
-                    string_viewing_azimuth = str(rq.viewing_azimuth).replace(".", "_")
-                    rq_id = f"hdrf_{string_viewing_zenith}__{string_viewing_azimuth}"
-
-                if rq_id == measure_id:
                     return (
-                        rq.target_lat,  # Will use scene center
-                        rq.target_lon,
-                        rq.reference_panel_offset_m,
+                        target_lat,
+                        target_lon,
+                        measurement.reference_height_offset_m,
                     )
 
         return None
@@ -137,107 +151,123 @@ class HDRFProcessor:
             disk_id="white_reference_disk_hdrf",
         )
 
-    def execute_dual_simulation(
+    def compute_hdrf_from_radiance_and_irradiance(
         self,
-        scene_description: SceneDescription,
-        scene_dir: UPath,
+        radiance_results: Dict[str, xr.Dataset],
+        irradiance_results: Dict[str, xr.Dataset],
         output_dir: UPath,
-    ) -> Tuple[xr.Dataset, xr.Dataset]:
-        """Execute dual simulation: actual scene + white reference scene."""
-        logger.info("=" * 60)
-        logger.info("HDRF Dual Simulation")
-        logger.info("=" * 60)
+    ) -> Dict[str, xr.Dataset]:
+        """Compute HDRF = (π × L_actual) / E_reference.
 
-        # Create white reference scene
-        reference_scene, self.reference_panel_coords = (
-            self.create_white_reference_scene(scene_description, scene_dir)
-        )
-        self.backend.reference_panel_coords = self.reference_panel_coords
+        This is the CORRECT approach: use measured radiance and irradiance.
+        NO dual simulation needed - that duplicates irradiance measurement!
 
-        # Run both simulations
-        logger.info("\nActual scene simulation...")
-        actual_results = self._run_simulation(
-            scene_description, scene_dir, output_dir / "actual", run_all_measures=True
-        )
+        Args:
+            radiance_results: Actual scene radiance measurements (L_actual)
+            irradiance_results: Irradiance measurements (E_reference)
+            output_dir: Output directory for HDRF results
 
-        logger.info("\nWhite reference simulation...")
-        reference_results = self._run_simulation(
-            reference_scene, scene_dir, output_dir / "reference", run_all_measures=False
-        )
-
-        logger.info(f"\n{'=' * 60}\n")
-        return actual_results, reference_results
-
-    def _run_simulation(
-        self,
-        scene: SceneDescription,
-        scene_dir: UPath,
-        output_dir: UPath,
-        run_all_measures: bool,
-    ) -> xr.Dataset:
-        """Run simulation, optionally filtering to HDRF measures only."""
-        import eradiate
+        Returns:
+            Dictionary of HDRF datasets by measure ID
+        """
+        import numpy as np
         from s2gos_utils.io.paths import mkdir
 
+        from .config import HDRFConfig
+
+        logger.info("=" * 60)
+        logger.info("HDRF Computation from Radiance + Irradiance")
+        logger.info("=" * 60)
+
         mkdir(output_dir)
-
-        experiment = self.backend._create_experiment(scene, scene_dir)
-
-        if run_all_measures:
-            # Run all configured measures
-            for i in range(len(experiment.measures)):
-                eradiate.run(experiment, measures=i)
-        else:
-            # Run only HDRF measures (skip others on white reference scene)
-            hdrf_ids = set(self.get_hdrf_measure_ids())
-            for i, measure in enumerate(experiment.measures):
-                measure_id = getattr(measure, "id", f"measure_{i}")
-                if measure_id in hdrf_ids:
-                    eradiate.run(experiment, measures=i)
-
-        return self.backend._process_results(experiment, output_dir)
-
-    def compute_hdrf(
-        self,
-        actual_results: Dict[str, xr.Dataset],
-        reference_results: Dict[str, xr.Dataset],
-    ) -> Dict[str, xr.Dataset]:
-        """Compute HDRF = L_actual / L_reference for each measure."""
-        logger.info("\nComputing HDRF...")
-
         hdrf_datasets = {}
-        for measure_id in self.get_hdrf_measure_ids():
-            if measure_id not in actual_results or measure_id not in reference_results:
-                logger.warning(f"Skipping {measure_id} (missing results)")
+
+        # Get HDRF configs
+        hdrf_configs = [
+            m for m in self.simulation_config.measurements if isinstance(m, HDRFConfig)
+        ]
+
+        for hdrf_config in hdrf_configs:
+            hdrf_id = (
+                hdrf_config.id
+                or f"hdrf_{hdrf_config.viewing_zenith}_{hdrf_config.viewing_azimuth}"
+            )
+            ref_id = hdrf_config.irradiance_measurement_id
+
+            logger.info(f"\n[{hdrf_id}]")
+            logger.info(f"  Using reference: {ref_id}")
+
+            # Get radiance from actual scene
+            if hdrf_id not in radiance_results:
+                logger.warning(f"  Skipping: no radiance results for {hdrf_id}")
                 continue
 
-            actual_ds = actual_results[measure_id]
-            reference_ds = reference_results[measure_id]
-
-            if "radiance" not in actual_ds or "radiance" not in reference_ds:
-                logger.warning(f"Skipping {measure_id} (no radiance)")
+            radiance_ds = radiance_results[hdrf_id]
+            if "radiance" not in radiance_ds:
+                logger.warning(f"  Skipping: no radiance variable in {hdrf_id}")
                 continue
 
-            L_actual = actual_ds["radiance"].squeeze(drop=True)
-            L_ref = reference_ds["radiance"].squeeze(drop=True)
+            L_actual = radiance_ds["radiance"]
 
-            if L_actual.dims != L_ref.dims:
-                logger.error(f"Skipping {measure_id} (dim mismatch)")
+            # Get irradiance from reference measurement
+            if ref_id not in irradiance_results:
+                logger.error(f"  ERROR: Reference irradiance '{ref_id}' not found!")
+                logger.error(f"  Available: {list(irradiance_results.keys())}")
                 continue
 
-            # HDRF = L_actual / L_reference (average reference to reduce noise)
-            hdrf = L_actual / L_ref.mean()
+            irradiance_ds = irradiance_results[ref_id]
+            if "boa_irradiance" not in irradiance_ds:
+                logger.warning(f"  Skipping: no boa_irradiance in {ref_id}")
+                continue
 
+            E_reference = irradiance_ds["boa_irradiance"]
+
+            # DIAGNOSTIC logging before HDRF calculation
+            logger.info(f"=== HDRF DIAGNOSTIC: {hdrf_id} ===")
+            logger.info(f"  L_actual dims: {L_actual.dims}, shape: {L_actual.shape}")
             logger.info(
-                f"  {measure_id}: mean={float(hdrf.mean()):.3f}, "
-                f"range=[{float(hdrf.min()):.3f}, {float(hdrf.max()):.3f}]"
+                f"  L_actual: mean={float(L_actual.mean()):.6e}, "
+                f"range=[{float(L_actual.min()):.6e}, {float(L_actual.max()):.6e}]"
+            )
+            logger.info(
+                f"  E_reference dims: {E_reference.dims}, shape: {E_reference.shape}"
+            )
+            logger.info(
+                f"  E_reference: mean={float(E_reference.mean()):.6e}, "
+                f"range=[{float(E_reference.min()):.6e}, {float(E_reference.max()):.6e}]"
             )
 
+            # Check wavelength coordinates match (using shared utilities)
+            l_wl_dim = find_wavelength_coord(L_actual)
+            e_wl_dim = find_wavelength_coord(E_reference)
+            l_wl_dim = [l_wl_dim] if l_wl_dim else []
+            e_wl_dim = [e_wl_dim] if e_wl_dim else []
+            if l_wl_dim and e_wl_dim:
+                logger.info(
+                    f"  L_actual wavelengths: {len(L_actual[l_wl_dim[0]])} points, "
+                    f"range=[{float(L_actual[l_wl_dim[0]].min()):.1f}, {float(L_actual[l_wl_dim[0]].max()):.1f}] nm"
+                )
+                logger.info(
+                    f"  E_reference wavelengths: {len(E_reference[e_wl_dim[0]])} points, "
+                    f"range=[{float(E_reference[e_wl_dim[0]].min()):.1f}, {float(E_reference[e_wl_dim[0]].max()):.1f}] nm"
+                )
+
+            # Compute HDRF = (π × L_actual) / E_reference
+            logger.info("  Computing: HDRF = (π × L_actual) / E_reference")
+            hdrf = (np.pi * L_actual) / E_reference
+
+            logger.info(
+                f"  HDRF result: mean={float(hdrf.mean()):.4f}, "
+                f"range=[{float(hdrf.min()):.4f}, {float(hdrf.max()):.4f}]"
+            )
+            logger.info("  Expected: HDRF typically 0.0-1.0 for natural surfaces")
+
+            # Create dataset
             hdrf_dataset = xr.Dataset(
                 {
                     "hdrf": hdrf,
                     "radiance_actual": L_actual,
-                    "radiance_reference": L_ref,
+                    "irradiance_reference": E_reference,
                 },
                 coords=hdrf.coords,
             )
@@ -246,26 +276,20 @@ class HDRFProcessor:
                 {
                     "quantity": "hdrf",
                     "units": "dimensionless",
-                    "method": "dual_simulation",
-                    "timestamp": datetime.now().isoformat(),
+                    "method": "radiance_irradiance_ratio",
+                    "reference_irradiance_id": ref_id,
                 }
             )
 
-            hdrf_datasets[measure_id] = hdrf_dataset
+            hdrf_datasets[hdrf_id] = hdrf_dataset
 
-        logger.info(f"Complete: {len(hdrf_datasets)} HDRF datasets\n")
+            # Save
+            output_file = output_dir / f"{hdrf_id}_hdrf.zarr"
+            hdrf_dataset.to_zarr(output_file, mode="w")
+            logger.info(f"  ✓ Saved: {output_file.name}")
+
+        logger.info(f"\n{'=' * 60}")
+        logger.info(f"Complete: {len(hdrf_datasets)} HDRF measurements")
+        logger.info(f"{'=' * 60}\n")
+
         return hdrf_datasets
-
-    def save_hdrf_results(
-        self, hdrf_datasets: Dict[str, xr.Dataset], output_dir: UPath
-    ) -> None:
-        """Save HDRF results to disk."""
-        from s2gos_utils.io.paths import mkdir
-
-        hdrf_dir = output_dir / "hdrf_results"
-        mkdir(hdrf_dir)
-
-        for measure_id, dataset in hdrf_datasets.items():
-            output_file = hdrf_dir / f"{measure_id}_hdrf.zarr"
-            dataset.to_zarr(output_file, mode="w")
-            logger.info(f"  Saved: {output_file.name}")

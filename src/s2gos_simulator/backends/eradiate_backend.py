@@ -4,8 +4,6 @@ from typing import Any, Dict, List, Optional, Union
 import numpy as np
 import xarray as xr
 from PIL import Image
-
-# Import coordinate transformation system
 from s2gos_utils.coordinates import CoordinateSystem
 from s2gos_utils.io.paths import open_file
 from s2gos_utils.scene import SceneDescription
@@ -19,10 +17,11 @@ from ..config import (
     DirectionalIllumination,
     GroundInstrumentType,
     GroundSensor,
+    HCRFConfig,
+    HDRFConfig,
     HemisphericalViewing,
-    IrradianceMeasurementConfig,
+    IrradianceConfig,
     LookAtViewing,
-    MeasurementType,
     PlatformType,
     SatelliteInstrument,
     SatellitePlatform,
@@ -189,21 +188,11 @@ class EradiateBackend(SimulationBackend):
                         f"Ground sensor {sensor.id} instrument type {sensor.instrument} is not supported"
                     )
 
-        for rq in self.simulation_config.radiative_quantities:
-            if rq.quantity.value not in self.supported_measurements:
+        for measurement in self.simulation_config.measurements:
+            if measurement.type not in self.supported_measurements:
                 errors.append(
-                    f"Radiative quantity {rq.quantity} is not supported by Eradiate backend"
+                    f"Measurement type '{measurement.type}' is not supported by Eradiate backend"
                 )
-
-            if rq.quantity in [
-                MeasurementType.BRF,
-                MeasurementType.HDRF,
-                MeasurementType.RADIANCE,
-            ]:
-                if rq.viewing_zenith is None or rq.viewing_azimuth is None:
-                    errors.append(
-                        f"Radiative quantity {rq.quantity} requires viewing_zenith and viewing_azimuth"
-                    )
 
         return errors
 
@@ -271,32 +260,16 @@ class EradiateBackend(SimulationBackend):
 
         print(f"Eradiate simulation: {self.simulation_config.name}")
         print(f"  Sensors: {len(self.simulation_config.sensors)}")
-        print(
-            f"  Radiative quantities: {len(self.simulation_config.radiative_quantities)}"
-        )
-        print(
-            f"  Irradiance measurements: {len(self.simulation_config.irradiance_measurements)}\n"
-        )
+        print(f"  Measurements: {len(self.simulation_config.measurements)}\n")
 
         hdrf_proc = HDRFProcessor(self)
         irr_proc = IrradianceProcessor(self)
         requires_hdrf = hdrf_proc.requires_hdrf()
         requires_irr = irr_proc.requires_irradiance()
 
-        # Route to appropriate workflow
-        if requires_hdrf and requires_irr:
-            print("Workflow: HDRF + Irradiance (combined)")
+        if requires_hdrf or requires_irr:
+            print("Workflow: Standard + BOA Irradiance")
             return self._run_combined_workflow(
-                scene_description, scene_dir, output_dir, hdrf_proc, irr_proc, **kwargs
-            )
-        elif requires_hdrf:
-            print("Workflow: HDRF (dual simulation)")
-            return self._run_hdrf_workflow(
-                scene_description, scene_dir, output_dir, hdrf_proc, **kwargs
-            )
-        elif requires_irr:
-            print("Workflow: BOA Irradiance")
-            return self._run_irradiance_workflow(
                 scene_description, scene_dir, output_dir, irr_proc, **kwargs
             )
         else:
@@ -329,54 +302,59 @@ class EradiateBackend(SimulationBackend):
 
     def _adjust_origin_target_for_terrain(
         self,
-        sensor,
-        view,
-        origin: list[float],
+        viewing,
         scene_description: SceneDescription,
         scene_dir: UPath,
     ) -> tuple[list[float], Optional[list[float]]]:
         """Adjust origin and optionally target for terrain-relative positioning.
 
+        Checks viewing geometry's terrain_relative_height flag and adjusts
+        z-coordinates relative to terrain elevation from DEM.
+
         Args:
-            sensor: Sensor with terrain_relative_height flag
-            view: Viewing configuration (may be LookAtViewing)
-            origin: Origin coordinates [x, y, z_offset] to adjust
+            viewing: Viewing geometry (LookAtViewing, AngularFromOriginViewing, etc.)
             scene_description: Scene description for terrain queries
             scene_dir: Scene directory for DEM access
 
         Returns:
             Tuple of (adjusted_origin, adjusted_target_or_None)
-            - adjusted_origin: Origin with z adjusted for terrain elevation
-            - adjusted_target: Target adjusted for terrain if LookAtViewing, else None
+            - adjusted_origin: Origin with z adjusted for terrain elevation if flag set
+            - adjusted_target: Target adjusted for terrain if LookAtViewing with flag set, else None
         """
-        target = None
+        from ..config import LookAtViewing
 
-        if sensor.terrain_relative_height:
-            x, y, z_offset = origin
-            terrain_elevation = self._query_terrain_elevation(
-                scene_description, scene_dir, x, y
+        if not getattr(viewing, "terrain_relative_height", False):
+            origin = list(viewing.origin)
+            target = list(viewing.target) if hasattr(viewing, "target") else None
+            return origin, target
+
+        origin = list(viewing.origin)
+        x, y, z_offset = origin
+        terrain_elevation = self._query_terrain_elevation(
+            scene_description, scene_dir, x, y
+        )
+        absolute_z = terrain_elevation + z_offset
+        origin[2] = absolute_z
+
+        logging.debug(
+            f"Viewing origin: terrain={terrain_elevation:.2f}m, "
+            f"offset={z_offset:.2f}m, final_z={absolute_z:.2f}m"
+        )
+
+        target = None
+        if isinstance(viewing, LookAtViewing):
+            target = list(viewing.target)
+            target_x, target_y, target_z_offset = target
+            target_terrain_elevation = self._query_terrain_elevation(
+                scene_description, scene_dir, target_x, target_y
             )
-            absolute_z = terrain_elevation + z_offset
-            origin[2] = absolute_z
+            target_absolute_z = target_terrain_elevation + target_z_offset
+            target[2] = target_absolute_z
 
             logging.debug(
-                f"Sensor {sensor.id} origin: terrain={terrain_elevation:.2f}m, "
-                f"offset={z_offset:.2f}m, final_z={absolute_z:.2f}m"
+                f"Viewing target: terrain={target_terrain_elevation:.2f}m, "
+                f"offset={target_z_offset:.2f}m, final_z={target_absolute_z:.2f}m"
             )
-
-            if isinstance(view, LookAtViewing):
-                target = list(view.target)
-                target_x, target_y, target_z_offset = target
-                target_terrain_elevation = self._query_terrain_elevation(
-                    scene_description, scene_dir, target_x, target_y
-                )
-                target_absolute_z = target_terrain_elevation + target_z_offset
-                target[2] = target_absolute_z
-
-                logging.debug(
-                    f"Sensor {sensor.id} target: terrain={target_terrain_elevation:.2f}m, "
-                    f"offset={target_z_offset:.2f}m, final_z={target_absolute_z:.2f}m"
-                )
 
         return origin, target
 
@@ -393,7 +371,6 @@ class EradiateBackend(SimulationBackend):
             scene_description, scene_dir, include_irradiance_measures
         )
 
-        # Run all measures
         for i in range(len(experiment.measures)):
             measure_id = getattr(experiment.measures[i], "id", f"measure_{i}")
             print(f"  Measure {i + 1}/{len(experiment.measures)}: {measure_id}")
@@ -406,124 +383,85 @@ class EradiateBackend(SimulationBackend):
 
         return self._process_results(experiment, output_dir)
 
-    def _run_hdrf_workflow(
-        self,
-        scene_description: SceneDescription,
-        scene_dir: UPath,
-        output_dir: UPath,
-        hdrf_processor: HDRFProcessor,
-        **kwargs,
-    ) -> xr.Dataset:
-        """HDRF workflow: actual + reference simulation → HDRF computation."""
-        actual_results, ref_results = hdrf_processor.execute_dual_simulation(
-            scene_description, scene_dir, output_dir
-        )
-        hdrf_results = hdrf_processor.compute_hdrf(actual_results, ref_results)
-        hdrf_processor.save_hdrf_results(hdrf_results, output_dir)
-
-        actual_dict = (
-            actual_results
-            if isinstance(actual_results, dict)
-            else {"results": actual_results}
-        )
-        all_results = {**actual_dict, **hdrf_results}
-
-        if kwargs.get("plot_image", False):
-            self._create_hdrf_visualizations(hdrf_results, output_dir)
-
-        print(f"\n✓ HDRF workflow complete: {len(hdrf_results)} datasets")
-        return all_results
-
-    def _run_irradiance_workflow(
-        self,
-        scene_description: SceneDescription,
-        scene_dir: UPath,
-        output_dir: UPath,
-        irradiance_processor: IrradianceProcessor,
-        **kwargs,
-    ) -> xr.Dataset:
-        """Irradiance workflow: sensor simulation + white disk measurements."""
-        # Run sensor simulation if any sensors configured
-        if len(self.simulation_config.sensors) > 0:
-            print("\n[1/2] Sensor simulation...")
-            actual_results = self._run_standard_simulation(
-                scene_description,
-                scene_dir,
-                output_dir / "actual",
-                include_irradiance_measures=False,  # Exclude irradiance from actual scene
-                **kwargs,
-            )
-        else:
-            print("\n[1/2] No sensors (irradiance-only mode)")
-            actual_results = {}
-
-        # Run irradiance measurements
-        print("\n[2/2] Irradiance measurements...")
-        irr_results = irradiance_processor.execute_irradiance_measurements(
-            scene_description, scene_dir, output_dir / "irradiance"
-        )
-
-        # Merge results
-        actual_dict = (
-            actual_results
-            if isinstance(actual_results, dict)
-            else {"results": actual_results}
-        )
-        all_results = {**actual_dict, **irr_results}
-
-        print(f"\n✓ Irradiance workflow complete: {len(irr_results)} measurements")
-        return all_results
-
     def _run_combined_workflow(
         self,
         scene_description: SceneDescription,
         scene_dir: UPath,
         output_dir: UPath,
-        hdrf_processor: HDRFProcessor,
         irradiance_processor: IrradianceProcessor,
         **kwargs,
     ) -> xr.Dataset:
-        """Combined workflow: sensors + HDRF + irradiance → reflectance (ρ = πL/E)."""
-        print("\n[1/3] Sensor simulation...")
+        """Execute combined workflow with dual simulation for HDRF/HCRF measurements.
+
+        This workflow is used when HDRF/HCRF measurements require BOA irradiance.
+        IrradianceConfig modifies the scene by adding a white Lambertian disk,
+        so it must be run separately to avoid affecting sensor measurements.
+
+        Workflow Steps:
+        1. Run actual scene simulation → sensor radiance results (L_raw)
+        2. Apply post-processing → SRF convolution, spatial averaging (L_processed)
+        3. Run white disk simulations → irradiance results (E_boa via reference disk)
+        4. Compute derived measurements → HDRF = π×L_processed / E, HCRF = π×L_processed / E
+
+        Key Architectural Decisions:
+        - HDRF/HCRF ALWAYS require dual simulation (actual + reference disk)
+        - Post-processing (SRF) MUST happen before computing HDRF/HCRF
+        - Each IrradianceConfig needs separate simulation (scene modifications)
+        - The π factor in HDRF/HCRF accounts for Lambertian white disk (ρ=1.0)
+
+        Args:
+            scene_description: Scene description from generator
+            scene_dir: Scene directory path
+            output_dir: Output directory for renders
+            irradiance_processor: IrradianceProcessor instance for BOA measurements
+            **kwargs: Additional options (plot_image, id_to_plot, etc.)
+
+        Returns:
+            xr.Dataset with combined results (sensors + irradiance + derived HDRF/HCRF)
+        """
+        print("\n[1/3] Radiance simulation (actual scene)...")
         actual_results = self._run_standard_simulation(
-            scene_description, scene_dir, output_dir / "actual", **kwargs
+            scene_description,
+            scene_dir,
+            output_dir / "radiance",
+            include_irradiance_measures=False,
+            **kwargs,
         )
 
-        print("\n[2/3] HDRF reference simulation...")
-        ref_scene, _ = hdrf_processor.create_white_reference_scene(
-            scene_description, scene_dir
-        )
-        ref_results = self._run_standard_simulation(
-            ref_scene, scene_dir, output_dir / "hdrf_reference", **kwargs
-        )
-        hdrf_results = hdrf_processor.compute_hdrf(actual_results, ref_results)
-        hdrf_processor.save_hdrf_results(hdrf_results, output_dir)
-
-        print("\n[3/3] Irradiance measurements...")
-        irr_results = irradiance_processor.execute_irradiance_measurements(
-            scene_description, scene_dir, output_dir / "irradiance"
-        )
-
-        # Compute reflectance factors: ρ = πL/E
-        from s2gos_simulator.reflectance_processor import ReflectanceProcessor
-
+        print("\n[1.5/3] Applying post-processing to sensor results...")
         actual_dict = (
             actual_results
             if isinstance(actual_results, dict)
             else {"results": actual_results}
         )
-        print("\nComputing reflectance (ρ = πL/E)...")
-        sensor_with_refl = ReflectanceProcessor().add_reflectance_to_results(
-            actual_dict, irr_results
+        actual_dict = self._apply_post_processing_to_sensors(actual_dict)
+
+        print("\n[2/3] BOA irradiance measurements (white disk)...")
+        irr_results = irradiance_processor.execute_irradiance_measurements(
+            scene_description, scene_dir, output_dir / "boa_irradiance"
         )
 
-        all_results = {**sensor_with_refl, **hdrf_results, **irr_results}
+        combined_results = {**actual_dict, **irr_results}
 
-        if kwargs.get("plot_image", False):
-            self._create_hdrf_visualizations(hdrf_results, output_dir)
+        derived_results = self._compute_derived_measurements(combined_results)
+        derived_output_dir = output_dir / "derived_results"
+        for derived_name, dataset in derived_results.items():
+            derived_output = (
+                derived_output_dir
+                / f"{self.simulation_config.name}_{derived_name}.zarr"
+            )
 
-        print(f"\n✓ Combined workflow complete: {len(all_results)} total datasets")
-        return all_results
+            dataset.attrs["id"] = derived_name
+
+            dataset.to_zarr(derived_output, mode="w")
+            print(f"Derived measure '{derived_name}' saved to {derived_output}")
+
+        postprocessed_results = {**combined_results, **derived_results}
+        print(postprocessed_results.keys())
+        print(
+            f"\n✓ Combined workflow complete: {len(postprocessed_results)} total datasets"
+        )
+        return postprocessed_results
 
     def _create_hdrf_visualizations(
         self, hdrf_results: Dict[str, xr.Dataset], output_dir: UPath
@@ -624,7 +562,6 @@ class EradiateBackend(SimulationBackend):
                     "Define materials in the scene's material library."
                 )
 
-            # Validate material exists in scene library
             if material not in scene_description.materials:
                 available = list(scene_description.materials.keys())
                 raise ValueError(
@@ -800,7 +737,6 @@ class EradiateBackend(SimulationBackend):
 
         adapter = EradiateMaterialAdapter()
 
-        # Get region material names (indices 11+) - these should NOT use HAMSTER
         region_material_names = {
             mat_name
             for idx, mat_name in scene_description.material_indices.items()
@@ -809,7 +745,6 @@ class EradiateBackend(SimulationBackend):
 
         for surface_name, hamster_data in hamster_data_dict.items():
             for mat_name in scene_description.materials.keys():
-                # Skip region materials - they should use their specified spectrum
                 if mat_name in region_material_names:
                     continue
 
@@ -1070,7 +1005,7 @@ class EradiateBackend(SimulationBackend):
                 self._expand_vegetation_collection(obj, scene_dir, kdict)
             elif obj_type == "disk":
                 self._add_disk(kdict, obj)
-            else:  # Default to PLY mesh
+            else:
                 self._add_ply_mesh(kdict, obj, scene_dir)
 
     def _create_experiment(
@@ -1089,23 +1024,24 @@ class EradiateBackend(SimulationBackend):
         Returns:
             AtmosphereExperiment configured for the scene
         """
-        # Store scene_dir and scene_description for use in sensor translation
         self._current_scene_dir = scene_dir
         self._current_scene_description = scene_description
 
-        # Process object materials that are dict definitions and add them to scene materials
+        generated_sensor_ids = self._auto_generate_sensors_for_measurements()
+        if generated_sensor_ids:
+            print(f"  Auto-generated {len(generated_sensor_ids)} sensors:")
+            for sensor_id in generated_sensor_ids:
+                print(f"    - {sensor_id}")
+
         self._process_object_materials(scene_description)
 
-        # Translate materials to Eradiate format
         kdict, kpmap = self._translate_materials(scene_description, scene_dir)
 
-        # Add HAMSTER spatial albedo materials if available
         hamster_data_dict = self._get_hamster_data_for_scene(
             scene_description, scene_dir
         )
         self._add_hamster_materials(kdict, kpmap, scene_description, hamster_data_dict)
 
-        # Create surfaces
         buffer = scene_description.buffer
         background = scene_description.background
 
@@ -1128,10 +1064,8 @@ class EradiateBackend(SimulationBackend):
                 )
             )
 
-        # Add 3D objects from scene
         self._add_scene_objects(kdict, scene_description, scene_dir)
 
-        # Create experiment components
         atmosphere = self._create_atmosphere_from_config(scene_description)
 
         illumination = self._translate_illumination()
@@ -1156,9 +1090,7 @@ class EradiateBackend(SimulationBackend):
     def _create_geometry_from_atmosphere(self, scene_description: SceneDescription):
         """Create geometry with bounds matching the atmosphere configuration."""
         atmosphere = scene_description.atmosphere
-        toa = (
-            atmosphere["toa"] if "toa" in atmosphere else 40000.0
-        )  # Top of atmosphere (meters)
+        toa = atmosphere["toa"] if "toa" in atmosphere else 40000.0
 
         geometry = {
             "type": "plane_parallel",
@@ -1189,9 +1121,7 @@ class EradiateBackend(SimulationBackend):
 
         Supports either joseki identifiers or CAMS NetCDF files.
         """
-        # Check if using CAMS NetCDF file or joseki identifier
         if "thermoprops_file" in mol_dict:
-            # Load CAMS NetCDF directly
             import xarray as xr
             from upath import UPath
 
@@ -1212,7 +1142,6 @@ class EradiateBackend(SimulationBackend):
                 "z": np.linspace(altitude_min, altitude_max, int(num_steps)) * ureg.m,
             }
 
-        # Read absorption database from scene config, fallback to Eradiate default
         absorption_data = (
             mol_dict.get("absorption_database") or AbsorptionDatabase.default()
         )
@@ -1252,7 +1181,6 @@ class EradiateBackend(SimulationBackend):
                 {"bounds": layer_dict.get("bounds", [0, 1])}
             )
 
-        # Create particle layer using direct Eradiate API
         layer = ParticleLayer(
             dataset=layer_dict["aerosol_dataset"],
             tau_ref=layer_dict["optical_thickness"],
@@ -1271,7 +1199,6 @@ class EradiateBackend(SimulationBackend):
             mol_dict = atmosphere_dict["molecular_atmosphere"]
             return self._create_molecular_atmosphere_from_dict(mol_dict)
         else:
-            # Default molecular atmosphere
             return self._create_molecular_atmosphere_from_dict({})
 
     def _create_homogeneous_atmosphere_from_scene(self, atmosphere_dict):
@@ -1316,7 +1243,6 @@ class EradiateBackend(SimulationBackend):
                 if layer:
                     particle_layers.append(layer)
 
-        # Create heterogeneous atmosphere using direct Eradiate API
         atmosphere = HeterogeneousAtmosphere(
             molecular_atmosphere=molecular_atmosphere, particle_layers=particle_layers
         )
@@ -1368,10 +1294,62 @@ class EradiateBackend(SimulationBackend):
         )
 
         origin_vec = np.array(view.origin)
-        # Use a farther target distance (1000m) for radiancemeters to ensure proper ray intersection
         target_vec = origin_vec + direction * 1000.0
 
         return target_vec.tolist(), direction.tolist()
+
+    def _viewing_angles_to_direction(
+        self, zenith: float, azimuth: float
+    ) -> list[float]:
+        """Convert viewing angles to direction vector for distant measure.
+
+        Args:
+            zenith: Viewing zenith angle in degrees (0° = nadir, 90° = horizon)
+            azimuth: Viewing azimuth angle in degrees (0° = North, 90° = East)
+
+        Returns:
+            Direction vector [x, y, z] pointing from distant sensor toward scene.
+            Uses coordinate system: x = East, y = North, z = Up.
+        """
+        zen_rad = np.deg2rad(zenith)
+        az_rad = np.deg2rad(azimuth)
+
+        direction = [
+            np.sin(zen_rad) * np.sin(az_rad),
+            np.sin(zen_rad) * np.cos(az_rad),
+            -np.cos(zen_rad),
+        ]
+
+        return direction
+
+    def _resolve_viewing_geometry(
+        self,
+        config,
+        viewing: Union[LookAtViewing, AngularFromOriginViewing],
+        scene_description: SceneDescription,
+        scene_dir: UPath,
+    ) -> tuple[list[float], list[float]]:
+        """Resolve viewing geometry to origin and target coordinates.
+
+        Applies terrain-relative adjustment if viewing geometry has the flag set.
+
+        Args:
+            config: Measurement config (for future use)
+            viewing: Viewing geometry specification
+            scene_description: Scene description for terrain elevation queries
+            scene_dir: Path to scene directory containing DEM
+
+        Returns:
+            Tuple of (origin, target) as lists of [x, y, z] coordinates
+        """
+        origin, target = self._adjust_origin_target_for_terrain(
+            viewing, scene_description, scene_dir
+        )
+
+        if isinstance(viewing, AngularFromOriginViewing) and target is None:
+            target, _ = self._calculate_target_from_angles(viewing)
+
+        return origin, target
 
     def _translate_sensors(
         self,
@@ -1395,7 +1373,6 @@ class EradiateBackend(SimulationBackend):
                     )
                 )
             elif isinstance(sensor, GroundSensor):
-                # Pass stored scene_dir and scene_description for terrain elevation queries
                 measures.append(
                     self._translate_ground_sensor(
                         sensor,
@@ -1405,13 +1382,23 @@ class EradiateBackend(SimulationBackend):
                 )
             else:
                 raise ValueError(f"Unsupported sensor type: {type(sensor)}")
-        for rad_quantity in self.simulation_config.radiative_quantities:
-            measures.append(self._translate_radiative_quantity(rad_quantity))
 
-        # Only include irradiance measures if requested (exclude for actual scene in irradiance workflow)
-        if include_irradiance_measures:
-            for irradiance_meas in self.simulation_config.irradiance_measurements:
-                measures.append(self._create_irradiance_measure(irradiance_meas))
+        from ..config import (
+            HCRFConfig,
+            HDRFConfig,
+            IrradianceConfig,
+        )
+
+        for measurement in self.simulation_config.measurements:
+            if isinstance(measurement, IrradianceConfig):
+                measures.append(self._create_irradiance_measure(measurement))
+            elif isinstance(measurement, HDRFConfig) or isinstance(
+                measurement, HCRFConfig
+            ):
+                continue
+            else:
+                raise ValueError(f"Unsupported measurement type: {type(measurement)}")
+
         return measures
 
     def _translate_satellite_sensor(
@@ -1466,13 +1453,12 @@ class EradiateBackend(SimulationBackend):
     ) -> Dict[str, Any]:
         """Translate UAV sensor to Eradiate measure.
 
-        Handles terrain-relative height positioning if enabled on sensor.
+        Handles terrain-relative height positioning if enabled on viewing geometry.
         """
         view = sensor.viewing
 
-        origin = list(view.origin)
         origin, target = self._adjust_origin_target_for_terrain(
-            sensor, view, origin, scene_description, scene_dir
+            view, scene_description, scene_dir
         )
 
         base_config = {
@@ -1517,14 +1503,30 @@ class EradiateBackend(SimulationBackend):
     ) -> Dict[str, Any]:
         """Translate ground sensor to Eradiate measure.
 
-        Handles terrain-relative height positioning if enabled on sensor.
+        Handles terrain-relative height positioning if enabled on viewing geometry.
+        For HYPSTAR sensors with post-processing enabled, uses wide uniform SRF
+        during simulation; Gaussian SRF is applied in post-processing.
         """
         view = sensor.viewing
+
+        if (
+            sensor.instrument == GroundInstrumentType.HYPSTAR
+            and sensor.hypstar_post_processing
+            and sensor.hypstar_post_processing.apply_srf
+        ):
+            simulation_srf = {
+                "type": "uniform",
+                "wmin": 380.0,
+                "wmax": 1680.0,
+                "value": 1.0,
+            }
+        else:
+            simulation_srf = self._translate_srf(sensor.srf)
 
         base_measure = {
             "id": sanitize_sensor_id(sensor.id),
             "spp": sensor.samples_per_pixel,
-            "srf": self._translate_srf(sensor.srf),
+            "srf": simulation_srf,
         }
 
         if isinstance(view, HemisphericalViewing):
@@ -1532,9 +1534,8 @@ class EradiateBackend(SimulationBackend):
             base_measure["direction"] = [0, 0, 1] if view.upward_looking else [0, 0, -1]
 
         elif isinstance(view, (LookAtViewing, AngularFromOriginViewing)):
-            origin = list(view.origin)
             origin, target = self._adjust_origin_target_for_terrain(
-                sensor, view, origin, scene_description, scene_dir
+                view, scene_description, scene_dir
             )
 
             base_measure["origin"] = origin
@@ -1551,14 +1552,16 @@ class EradiateBackend(SimulationBackend):
                     else 70.0
                 )
                 base_measure["up"] = view.up or [0, 0, 1]
+
             elif sensor.instrument == GroundInstrumentType.HYPSTAR:
-                # HYPSTAR acts as a narrow-FOV perspective camera
                 base_measure["type"] = "perspective"
                 base_measure["film_resolution"] = sensor.resolution or [5, 5]
                 base_measure["fov"] = sensor.fov or 5.0
                 base_measure["up"] = view.up or [0, 0, 1]
+
             elif sensor.instrument == GroundInstrumentType.RADIANCEMETER:
                 base_measure["type"] = "radiancemeter"
+
             else:
                 base_measure["type"] = "radiancemeter"
 
@@ -1569,119 +1572,548 @@ class EradiateBackend(SimulationBackend):
                 target, direction = self._calculate_target_from_angles(view)
                 base_measure["target"] = target
 
-                # DEBUG: Print radiancemeter configuration
-                if sensor.instrument == GroundInstrumentType.RADIANCEMETER:
-                    print(f"\n{'=' * 70}")
-                    print(f"RADIANCEMETER DEBUG - Sensor: {sensor.id}")
-                    print(f"{'=' * 70}")
-                    print(f"Origin (adjusted):     {base_measure['origin']}")
-                    print(f"Target (calculated):   {target}")
-                    print(f"Direction:             {direction}")
-                    print(f"Zenith angle:          {view.zenith}°")
-                    print(f"Azimuth angle:         {view.azimuth}°")
-                    print(f"Terrain relative:      {sensor.terrain_relative_height}")
-                    print(f"{'=' * 70}\n")
         else:
             raise ValueError(
                 f"Unsupported viewing type for ground sensor: {type(view)}"
             )
-        # print("!!!!!!!!!!!")
-        # print(len(base_measure["srf"]["wavelengths"]))
-        # print(len(base_measure["srf"]["values"]))
 
         return base_measure
 
-    def _translate_radiative_quantity(self, rad_quantity) -> Dict[str, Any]:
-        """Translate radiative quantity configuration to Eradiate measure.
-
-        Handles HDRF, BHR, and other radiative quantities by creating appropriate
-        Eradiate measures. For HDRF, creates BOA distant measure with ray offset.
-
-        Args:
-            rad_quantity: RadiativeQuantityConfig object
+    def _auto_generate_sensors_for_measurements(self) -> List[str]:
+        """Auto-generate sensors for measurements that require them.
 
         Returns:
-            Eradiate measure configuration dictionary
+            List of generated sensor IDs
         """
-        if rad_quantity.quantity == MeasurementType.HDRF:
-            return self._create_hdrf_measure(rad_quantity)
-        elif rad_quantity.quantity == MeasurementType.BHR:
-            return self._create_bhr_measure(rad_quantity)
-        else:
-            # Placeholder for other quantities
-            quantity_id = f"{rad_quantity.quantity.value}_measure"
-            print(
-                f"TODO: {rad_quantity.quantity.value.upper()} calculation not yet implemented - generating placeholder"
-            )
-            return {
-                "id": quantity_id,
-                "type": "distant",
-                "construct": "from_angles",
-                "angles": [0.0, 0.0],
-                "spp": rad_quantity.samples_per_pixel,
-                "srf": self._translate_srf(rad_quantity.srf),
-            }
+        generated_sensor_ids = []
 
-    def _create_hdrf_measure(self, rad_quantity) -> Dict[str, Any]:
-        """Create BOA distant measure for HDRF computation.
+        for measurement in self.simulation_config.measurements:
+            if (
+                isinstance(measurement, HDRFConfig)
+                and measurement.radiance_sensor_id is None
+            ):
+                radiance_sensor = self._generate_radiance_sensor_for_hdrf(measurement)
+                irradiance_measurement = self._generate_irradiance_measurement_for_hdrf(
+                    measurement
+                )
+
+                self.simulation_config.sensors.append(radiance_sensor)
+                self.simulation_config.measurements.append(irradiance_measurement)
+
+                measurement.radiance_sensor_id = radiance_sensor.id
+                measurement.irradiance_measurement_id = irradiance_measurement.id
+
+                generated_sensor_ids.append(radiance_sensor.id)
+                logging.info(
+                    f"Auto-generated radiance sensor '{radiance_sensor.id}' and irradiance measurement '{irradiance_measurement.id}' for HDRF '{measurement.id}'"
+                )
+
+            elif (
+                isinstance(measurement, HCRFConfig)
+                and measurement.radiance_sensor_id is None
+            ):
+                camera_sensor = self._generate_camera_sensor_for_hcrf(measurement)
+                irradiance_measurement = self._generate_irradiance_measurement_for_hcrf(
+                    measurement
+                )
+
+                self.simulation_config.sensors.append(camera_sensor)
+                self.simulation_config.measurements.append(irradiance_measurement)
+
+                measurement.radiance_sensor_id = camera_sensor.id
+                measurement.irradiance_measurement_id = irradiance_measurement.id
+
+                generated_sensor_ids.append(camera_sensor.id)
+                logging.info(
+                    f"Auto-generated camera sensor '{camera_sensor.id}' and irradiance measurement '{irradiance_measurement.id}' for HCRF '{measurement.id}'"
+                )
+
+        return generated_sensor_ids
+
+    def _generate_radiance_sensor_for_hdrf(
+        self, hdrf_config: HDRFConfig
+    ) -> GroundSensor:
+        """Generate radiance sensor for HDRF measurement.
 
         Args:
-            rad_quantity: RadiativeQuantityConfig with HDRF settings
+            hdrf_config: HDRFConfig in auto-generation mode
 
         Returns:
-            Eradiate mdistant measure configuration
+            GroundSensor configured for radiance measurement
         """
-        # Use stored ID if available, otherwise generate from angles
-        if rad_quantity.id:
-            measure_id = sanitize_sensor_id(rad_quantity.id)
-        else:
-            string_viewing_zenith = str(rad_quantity.viewing_zenith).replace(".", "_")
-            string_viewing_azimuth = str(rad_quantity.viewing_azimuth).replace(".", "_")
-            measure_id = f"hdrf_{string_viewing_zenith}__{string_viewing_azimuth}"
+        sensor_id = (
+            f"{hdrf_config.id}_radiance" if hdrf_config.id else "hdrf_radiance_sensor"
+        )
 
-        if (
-            hasattr(self, "reference_panel_coords")
-            and self.reference_panel_coords is not None
-        ):
-            target_xyz = list(self.reference_panel_coords)
-            logging.info(
-                f"Using reference panel coordinates for HDRF measure: {target_xyz}"
+        if hdrf_config.instrument == "radiancemeter":
+            return GroundSensor(
+                id=sensor_id,
+                instrument=GroundInstrumentType.RADIANCEMETER,
+                viewing=hdrf_config.viewing,
+                samples_per_pixel=hdrf_config.samples_per_pixel,
+                srf=hdrf_config.srf,
+            )
+        elif hdrf_config.instrument == "hemispherical":
+            if not hdrf_config.location:
+                raise ValueError("Hemispherical HDRF requires 'location' field")
+
+            if (
+                hdrf_config.location.target_lat is not None
+                and hdrf_config.location.target_lon is not None
+            ):
+                coords = CoordinateSystem(
+                    self._current_scene_description.location["center_lat"],
+                    self._current_scene_description.location["center_lon"],
+                )
+                origin_x, origin_y = coords.latlon_to_scene(
+                    hdrf_config.location.target_lat, hdrf_config.location.target_lon
+                )
+                origin_z = (
+                    hdrf_config.location.height_offset_m
+                    if hdrf_config.location.terrain_relative_height
+                    else hdrf_config.location.target_z
+                )
+            else:
+                origin_x = hdrf_config.location.target_x
+                origin_y = hdrf_config.location.target_y
+                origin_z = (
+                    hdrf_config.location.height_offset_m
+                    if hdrf_config.location.terrain_relative_height
+                    else hdrf_config.location.target_z
+                )
+
+            return GroundSensor(
+                id=sensor_id,
+                instrument=GroundInstrumentType.RADIANCEMETER,
+                viewing=HemisphericalViewing(
+                    origin=[origin_x, origin_y, origin_z],
+                    upward_looking=False,
+                    terrain_relative_height=hdrf_config.location.terrain_relative_height,
+                ),
+                samples_per_pixel=hdrf_config.samples_per_pixel,
+                srf=hdrf_config.srf,
             )
         else:
-            target_xyz = [0, 0, 1]
-            logging.warning(
-                "No reference panel coordinates found, using default [0, 0, 1]"
+            raise ValueError(
+                f"Unsupported HDRF instrument type: {hdrf_config.instrument}"
             )
 
-        measure_config = {
-            "type": "hdistant",
-            "id": measure_id,
-            "srf": self._translate_srf(rad_quantity.srf),
-            "target": target_xyz,
-            "ray_offset": HDRF_RAY_OFFSET,
-            "spp": rad_quantity.samples_per_pixel,
-        }
+    def _generate_irradiance_measurement_for_hdrf(
+        self, hdrf_config: HDRFConfig
+    ) -> IrradianceConfig:
+        """Generate irradiance measurement for HDRF.
 
-        return measure_config
+        Args:
+            hdrf_config: HDRFConfig in auto-generation mode
 
-    def _create_irradiance_measure(
-        self, irradiance_config: IrradianceMeasurementConfig
-    ) -> Dict[str, Any]:
+        Returns:
+            IrradianceConfig for BOA irradiance measurement
+        """
+        from ..config import HemisphericalMeasurementLocation
+
+        measurement_id = (
+            f"{hdrf_config.id}_irradiance" if hdrf_config.id else "hdrf_irradiance"
+        )
+
+        if hdrf_config.instrument == "radiancemeter":
+            origin = list(hdrf_config.viewing.origin)
+            terrain_relative = hdrf_config.viewing.terrain_relative_height
+        elif hdrf_config.instrument == "hemispherical":
+            if (
+                hdrf_config.location.target_lat is not None
+                and hdrf_config.location.target_lon is not None
+            ):
+                coords = CoordinateSystem(
+                    self._current_scene_description.location["center_lat"],
+                    self._current_scene_description.location["center_lon"],
+                )
+                origin_x, origin_y = coords.latlon_to_scene(
+                    hdrf_config.location.target_lat, hdrf_config.location.target_lon
+                )
+                origin_z = hdrf_config.reference_height_offset_m
+            else:
+                origin_x = hdrf_config.location.target_x
+                origin_y = hdrf_config.location.target_y
+                origin_z = hdrf_config.reference_height_offset_m
+
+            origin = [origin_x, origin_y, origin_z]
+            terrain_relative = hdrf_config.location.terrain_relative_height
+        else:
+            raise ValueError(
+                f"Unsupported HDRF instrument type: {hdrf_config.instrument}"
+            )
+
+        origin[2] = hdrf_config.reference_height_offset_m
+
+        location = HemisphericalMeasurementLocation(
+            target_x=origin[0],
+            target_y=origin[1],
+            target_z=None,
+            height_offset_m=origin[2],
+            terrain_relative_height=terrain_relative,
+            upward_looking=True,
+            srf=hdrf_config.srf,
+            samples_per_pixel=hdrf_config.samples_per_pixel,
+        )
+
+        return IrradianceConfig(id=measurement_id, location=location)
+
+    def _generate_camera_sensor_for_hcrf(self, hcrf_config: HCRFConfig) -> GroundSensor:
+        """Generate camera sensor for HCRF measurement.
+
+        Args:
+            hcrf_config: HCRFConfig in auto-generation mode
+
+        Returns:
+            GroundSensor configured as perspective camera
+        """
+        sensor_id = (
+            f"{hcrf_config.id}_camera" if hcrf_config.id else "hcrf_camera_sensor"
+        )
+
+        return GroundSensor(
+            id=sensor_id,
+            instrument=GroundInstrumentType.PERSPECTIVE_CAMERA,
+            viewing=hcrf_config.viewing,
+            fov=hcrf_config.fov,
+            resolution=hcrf_config.film_resolution,
+            samples_per_pixel=hcrf_config.samples_per_pixel,
+            srf=hcrf_config.srf if hasattr(hcrf_config, "srf") else None,
+        )
+
+    def _generate_irradiance_measurement_for_hcrf(
+        self, hcrf_config: HCRFConfig
+    ) -> IrradianceConfig:
+        """Generate irradiance measurement for HCRF.
+
+        Args:
+            hcrf_config: HCRFConfig in auto-generation mode
+
+        Returns:
+            IrradianceConfig for BOA irradiance measurement
+        """
+        from ..config import HemisphericalMeasurementLocation
+
+        measurement_id = (
+            f"{hcrf_config.id}_irradiance" if hcrf_config.id else "hcrf_irradiance"
+        )
+
+        origin = list(hcrf_config.viewing.origin)
+        origin[2] = hcrf_config.reference_height_offset_m
+
+        location = HemisphericalMeasurementLocation(
+            target_x=origin[0],
+            target_y=origin[1],
+            target_z=None,
+            height_offset_m=origin[2],
+            terrain_relative_height=hcrf_config.terrain_relative_height,
+            upward_looking=True,
+            srf=hcrf_config.srf if hasattr(hcrf_config, "srf") else None,
+            samples_per_pixel=hcrf_config.samples_per_pixel,
+        )
+
+        return IrradianceConfig(id=measurement_id, location=location)
+
+    def _compute_derived_measurements(
+        self, sensor_results: Dict[str, xr.Dataset]
+    ) -> Dict[str, xr.Dataset]:
+        """Compute derived measurements (HDRF, HCRF) from sensor results.
+
+        Args:
+            sensor_results: Dictionary mapping sensor IDs to their result datasets
+
+        Returns:
+            Dictionary of derived measurement results
+        """
+        EPSILON = 1e-10
+        derived_results = {}
+
+        for measurement in self.simulation_config.measurements:
+            if isinstance(measurement, HDRFConfig):
+                if (
+                    measurement.radiance_sensor_id
+                    and measurement.irradiance_measurement_id
+                ):
+                    radiance_data = sensor_results.get(measurement.radiance_sensor_id)
+                    irradiance_data = sensor_results.get(
+                        measurement.irradiance_measurement_id
+                    )
+
+                    if radiance_data is not None and irradiance_data is not None:
+                        hdrf_result = self._compute_hdrf(
+                            radiance_data, irradiance_data, measurement, EPSILON
+                        )
+                        measurement_id = (
+                            measurement.id
+                            if measurement.id
+                            else f"hdrf_{measurement.radiance_sensor_id}"
+                        )
+                        derived_results[measurement_id] = hdrf_result
+                        logging.info(
+                            f"Computed HDRF for measurement '{measurement_id}'"
+                        )
+                    else:
+                        logging.warning(
+                            f"Missing radiance or irradiance data for HDRF '{measurement.id}'"
+                        )
+
+            elif isinstance(measurement, HCRFConfig):
+                if (
+                    measurement.radiance_sensor_id
+                    and measurement.irradiance_measurement_id
+                ):
+                    radiance_data = sensor_results.get(measurement.radiance_sensor_id)
+                    irradiance_data = sensor_results.get(
+                        measurement.irradiance_measurement_id
+                    )
+
+                    if radiance_data is not None and irradiance_data is not None:
+                        hcrf_result = self._compute_hcrf(
+                            radiance_data, irradiance_data, measurement, EPSILON
+                        )
+                        measurement_id = (
+                            measurement.id
+                            if measurement.id
+                            else f"hcrf_{measurement.radiance_sensor_id}"
+                        )
+                        derived_results[measurement_id] = hcrf_result
+                        logging.info(
+                            f"Computed HCRF for measurement '{measurement_id}'"
+                        )
+                    else:
+                        logging.warning(
+                            f"Missing radiance or irradiance data for HCRF '{measurement.id}'"
+                        )
+
+        return derived_results
+
+    def _compute_hdrf(
+        self,
+        radiance_dataset: xr.Dataset,
+        irradiance_dataset: xr.Dataset,
+        config: HDRFConfig,
+        epsilon: float = 1e-10,
+    ) -> xr.Dataset:
+        """Compute HDRF from radiance and irradiance datasets.
+
+        HDRF = π×L / E (hemispherical-directional reflectance factor)
+
+        Args:
+            radiance_dataset: Dataset with radiance measurements
+            irradiance_dataset: Dataset with irradiance measurements
+            config: HDRFConfig for metadata
+            epsilon: Small value to prevent division by zero
+
+        Returns:
+            Dataset containing HDRF, radiance, and irradiance
+        """
+        L = self._extract_radiance_variable(radiance_dataset)
+        E = self._extract_irradiance_variable(irradiance_dataset)
+
+        if "w" in L.dims and "w" in E.dims:
+            if not np.array_equal(L.w.values, E.w.values):
+                E = E.interp(w=L.w, method="linear")
+
+        hdrf = (np.pi * L) / (E + epsilon)
+
+        result = xr.Dataset({"hdrf": hdrf, "radiance": L, "irradiance": E})
+
+        result.attrs["measurement_type"] = "hdrf"
+        result.attrs["measurement_id"] = config.id
+        result.attrs["instrument"] = config.instrument
+        if config.radiance_sensor_id:
+            result.attrs["radiance_sensor_id"] = config.radiance_sensor_id
+        if config.irradiance_measurement_id:
+            result.attrs["irradiance_measurement_id"] = config.irradiance_measurement_id
+
+        return result
+
+    def _compute_hcrf(
+        self,
+        radiance_dataset: xr.Dataset,
+        irradiance_dataset: xr.Dataset,
+        config: HCRFConfig,
+        epsilon: float = 1e-10,
+    ) -> xr.Dataset:
+        """Compute HCRF from radiance and irradiance datasets.
+
+        HCRF = π×L / E (hemispherical-conical reflectance factor)
+
+        Args:
+            radiance_dataset: Dataset with camera radiance measurements
+            irradiance_dataset: Dataset with irradiance measurements
+            config: HCRFConfig for metadata and post-processing
+            epsilon: Small value to prevent division by zero
+
+        Returns:
+            Dataset containing HCRF, radiance, and irradiance
+        """
+        L = self._extract_radiance_variable(radiance_dataset)
+        E = self._extract_irradiance_variable(irradiance_dataset)
+
+        if "w" in L.dims and "w" in E.dims:
+            if not np.array_equal(L.w.values, E.w.values):
+                E = E.interp(w=L.w, method="linear")
+
+        if set(L.dims) - set(E.dims):
+            E = E.broadcast_like(L)
+
+        hcrf = (np.pi * L) / (E + epsilon)
+
+        result = xr.Dataset({"hcrf": hcrf, "radiance": L, "irradiance": E})
+
+        result.attrs["measurement_type"] = "hcrf"
+        result.attrs["measurement_id"] = config.id
+        if config.radiance_sensor_id:
+            result.attrs["radiance_sensor_id"] = config.radiance_sensor_id
+        if config.irradiance_measurement_id:
+            result.attrs["irradiance_measurement_id"] = config.irradiance_measurement_id
+
+        if config.post_processing:
+            result = self._apply_hcrf_post_processing(result, config.post_processing)
+
+        return result
+
+    def _apply_hcrf_post_processing(
+        self, dataset: xr.Dataset, post_processing_config
+    ) -> xr.Dataset:
+        """Apply post-processing to HCRF results.
+
+        Args:
+            dataset: HCRF dataset with hcrf, radiance, irradiance
+            post_processing_config: HCRFPostProcessingConfig
+
+        Returns:
+            Post-processed dataset
+        """
+        hcrf = dataset["hcrf"]
+
+        if post_processing_config.compute_spatial_average:
+            if "x_index" in hcrf.dims and "y_index" in hcrf.dims:
+                if post_processing_config.spatial_statistic == "mean":
+                    hcrf_averaged = hcrf.mean(dim=["x_index", "y_index"])
+                elif post_processing_config.spatial_statistic == "median":
+                    hcrf_averaged = hcrf.median(dim=["x_index", "y_index"])
+                else:
+                    hcrf_averaged = hcrf.mean(dim=["x_index", "y_index"])
+
+                dataset["hcrf_averaged"] = hcrf_averaged
+                logging.info(
+                    f"Applied spatial averaging ({post_processing_config.spatial_statistic})"
+                )
+
+        return dataset
+
+    def _get_sensor_by_id(self, sensor_id: str):
+        """Find sensor config by ID.
+
+        Args:
+            sensor_id: Sensor identifier
+
+        Returns:
+            Sensor configuration object or None if not found
+        """
+        for sensor in self.simulation_config.sensors:
+            if sensor.id == sensor_id:
+                return sensor
+        return None
+
+    def _apply_post_processing_to_sensors(
+        self, sensor_results: Dict[str, xr.Dataset]
+    ) -> Dict[str, xr.Dataset]:
+        """Apply sensor-specific post-processing to simulation results.
+        Must happen before derived measurements (HDRF/HCRF) are computed.
+
+        Args:
+            sensor_results: Raw sensor results from simulation
+
+        Returns:
+            Post-processed sensor results
+        """
+        from s2gos_simulator.processors.post_processor import PostProcessor
+
+        processor = PostProcessor(self.simulation_config)
+        processed_results = {}
+
+        for sensor_id, dataset in sensor_results.items():
+            sensor = self._get_sensor_by_id(sensor_id)
+            if sensor is not None:
+                processed_results[sensor_id] = processor.process_sensor_result(
+                    dataset, sensor
+                )
+            else:
+                processed_results[sensor_id] = dataset
+
+        return processed_results
+
+    def _extract_radiance_variable(self, dataset: xr.Dataset) -> xr.DataArray:
+        """Extract radiance variable from dataset.
+
+        Args:
+            dataset: xarray Dataset
+
+        Returns:
+            DataArray containing radiance data
+        """
+        radiance_names = ["radiance", "L", "l", "rad", "Radiance"]
+
+        for name in radiance_names:
+            if name in dataset:
+                return dataset[name]
+
+        available = list(dataset.data_vars.keys())
+        raise ValueError(
+            f"No radiance variable found in dataset. "
+            f"Looked for: {radiance_names}. Available variables: {available}"
+        )
+
+    def _extract_irradiance_variable(self, dataset: xr.Dataset) -> xr.DataArray:
+        """Extract irradiance variable from dataset.
+
+        Args:
+            dataset: xarray Dataset
+
+        Returns:
+            DataArray containing irradiance data
+
+        Raises:
+            ValueError: If no irradiance variable found
+        """
+        irradiance_names = [
+            "irradiance",
+            "E",
+            "e",
+            "irr",
+            "Irradiance",
+            "boa_irradiance",
+        ]
+
+        for name in irradiance_names:
+            if name in dataset:
+                return dataset[name]
+
+        available = list(dataset.data_vars.keys())
+        raise ValueError(
+            f"No irradiance variable found in dataset. "
+            f"Looked for: {irradiance_names}. Available variables: {available}"
+        )
+
+    def _create_irradiance_measure(self, irradiance_config) -> Dict[str, Any]:
         """Create BOA distant measure for irradiance measurement.
 
         Uses the same technique as HDRF reference measurements: creates a
-        hemispherical distant sensor pointing at a white disk location to
+        hemispherical distant sensor pointing at a reference disk location to
         measure downward irradiance at BOA.
 
         Args:
-            irradiance_config: IrradianceMeasurementConfig with measurement settings
+            irradiance_config: IrradianceConfig with measurement settings
 
         Returns:
             Eradiate hdistant measure configuration
         """
+
         measure_id = sanitize_sensor_id(irradiance_config.id)
 
-        # Get disk coordinates if available (set by IrradianceProcessor)
         if (
             hasattr(self, "irradiance_disk_coords")
             and self.irradiance_disk_coords is not None
@@ -1702,30 +2134,98 @@ class EradiateBackend(SimulationBackend):
         measure_config = {
             "type": "hdistant",
             "id": measure_id,
-            "srf": self._translate_srf(irradiance_config.srf),
+            "srf": self._translate_srf(irradiance_config.location.srf),
             "target": target_xyz,
-            "ray_offset": HDRF_RAY_OFFSET,  # Reuse same offset to avoid self-intersection
+            "ray_offset": HDRF_RAY_OFFSET,
             "spp": irradiance_config.samples_per_pixel,
         }
 
         return measure_config
 
-    def _create_bhr_measure(self, rad_quantity) -> Dict[str, Any]:
+    def _create_brf_measure(self, brf_config) -> Dict[str, Any]:
+        """Create BOA distant measure for BRF computation.
+
+        Args:
+            brf_config: BRFConfig with viewing geometry and measurement settings
+
+        Returns:
+            Eradiate distant measure configuration
+        """
+
+        if brf_config.id:
+            measure_id = sanitize_sensor_id(brf_config.id)
+        else:
+            string_viewing_zenith = str(brf_config.viewing_zenith).replace(".", "_")
+            string_viewing_azimuth = str(brf_config.viewing_azimuth).replace(".", "_")
+            measure_id = f"brf_{string_viewing_zenith}__{string_viewing_azimuth}"
+
+        direction = self._viewing_angles_to_direction(
+            brf_config.viewing_zenith, brf_config.viewing_azimuth
+        )
+
+        target_xyz = [0, 0, 0]
+
+        measure_config = {
+            "type": "distant",
+            "id": measure_id,
+            "srf": self._translate_srf(brf_config.srf),
+            "direction": direction,
+            "target": target_xyz,
+            "spp": brf_config.samples_per_pixel,
+        }
+
+        return measure_config
+
+    def _create_radiance_measure(self, radiance_config) -> Dict[str, Any]:
+        """Create BOA radiance measure.
+
+        Args:
+            radiance_config: RadianceConfig with measurement settings
+
+        Returns:
+            Eradiate distant measure configuration
+        """
+
+        measure_id = (
+            sanitize_sensor_id(radiance_config.id)
+            if radiance_config.id
+            else "radiance_measure"
+        )
+
+        # Default nadir viewing (straight down)
+        direction = [0, 0, -1]
+
+        # Use target location if specified, otherwise scene center
+        target_xyz = [0, 0, 0]
+
+        measure_config = {
+            "type": "distant",
+            "id": measure_id,
+            "srf": self._translate_srf(radiance_config.srf),
+            "direction": direction,
+            "target": target_xyz,
+            "spp": radiance_config.samples_per_pixel,
+        }
+
+        return measure_config
+
+    def _create_bhr_measure(self, bhr_config) -> Dict[str, Any]:
         """Create hemispherical measure for BHR computation.
 
         Args:
-            rad_quantity: RadiativeQuantityConfig with BHR settings
+            bhr_config: BHRConfig with BHR settings
 
         Returns:
             Eradiate measure configuration
         """
-        measure_id = "bhr_measure"
+
+        measure_id = bhr_config.id if bhr_config.id else "bhr_measure"
 
         measure_config = {
             "type": "hdistant",
             "id": measure_id,
-            "srf": self._translate_srf(rad_quantity.srf),
-            "spp": rad_quantity.samples_per_pixel,
+            "srf": self._translate_srf(bhr_config.srf),
+            "spp": bhr_config.samples_per_pixel,
             "direction": [0, 0, -1],
         }
 
@@ -1740,7 +2240,6 @@ class EradiateBackend(SimulationBackend):
         elif isinstance(srf, dict):
             return srf
         else:
-            # From config
             if srf.type == "delta":
                 return {"type": "delta", "wavelengths": srf.wavelengths}
             elif srf.type == "uniform":
@@ -1752,29 +2251,7 @@ class EradiateBackend(SimulationBackend):
                 }
             elif srf.type == "dataset":
                 return srf.dataset_id
-                # elif srf.type == "gaussian":
-                #     # Approximate Gaussian SRF as uniform SRF over FWHM range
-                #     # HYPSTAR requirements: FWHM = 3nm (<1000nm) or 10nm (≥1000nm)
-                #     #
-                #     # Note: Narrow-band Gaussian SRFs have compatibility issues with Eradiate's
-                #     # spectral grid selection, even in CKD mode. The working approach (from
-                #     # Eradiate's hyperspectral_timeseries.ipynb example) uses broad uniform SRFs
-                #     # during simulation and applies narrow Gaussian SRFs in post-processing.
-                #     #
-                #     # This uniform approximation captures the spectral width while ensuring
-                #     # reliable simulation. For future enhancement, implement two-stage workflow:
-                #     # 1. Simulate with broad uniform SRF (400-2400 nm)
-                #     # 2. Apply narrow Gaussian SRFs via apply_spectral_response() post-processing
-                #     wl_center = srf.wavelengths[0]  # Single center wavelength
-                #     fwhm = srf.fwhm
-                #     half_width = fwhm / 2.0
 
-                return {
-                    "type": "uniform",
-                    "wmin": wl_center - half_width,
-                    "wmax": wl_center + half_width,
-                    "value": 1.0,
-                }
             elif srf.type == "custom":
                 if srf.data and "wavelengths" in srf.data and "values" in srf.data:
                     return {
@@ -1812,15 +2289,11 @@ class EradiateBackend(SimulationBackend):
             "backend": "eradiate",
             "output_dir": str(output_dir),
             "num_sensors": len(self.simulation_config.sensors),
-            "num_radiative_quantities": len(
-                self.simulation_config.radiative_quantities
-            ),
+            "num_measurements": len(self.simulation_config.measurements),
             "sensor_types": [
                 s.platform_type.value for s in self.simulation_config.sensors
             ],
-            "radiative_quantities": [
-                rq.quantity.value for rq in self.simulation_config.radiative_quantities
-            ],
+            "measurement_types": [m.type for m in self.simulation_config.measurements],
             "illumination_type": self.simulation_config.illumination.type,
         }
 
@@ -1845,7 +2318,6 @@ class EradiateBackend(SimulationBackend):
             Tuple of (selection_texture_data, material_ids, material_dict)
             where material_dict is the selectbsdf configuration
         """
-        # Load and prepare selection texture
         with open_file(texture_path, "rb") as f:
             texture_image = Image.open(f)
             texture_image.load()
@@ -1856,8 +2328,6 @@ class EradiateBackend(SimulationBackend):
         material_ids = self._get_material_ids_from_scene(scene_description)
 
         if hamster_available:
-            # Only apply HAMSTER suffix to base landcover materials (indices 0-10)
-            # Region materials (indices 11+) keep their original names
             material_ids = [
                 f"{mat_id}_{surface_name}" if int(idx) < 11 else mat_id
                 for idx, mat_id in zip(
@@ -1901,7 +2371,6 @@ class EradiateBackend(SimulationBackend):
         target_mesh_path = scene_dir / target_config["mesh"]
         target_texture_path = scene_dir / target_config["selection_texture"]
 
-        # Create selectbsdf material (common logic extracted)
         _, _, material_dict = self._create_selectbsdf_material(
             "target",
             scene_description,
@@ -1910,7 +2379,6 @@ class EradiateBackend(SimulationBackend):
             hamster_available,
         )
 
-        # Create terrain mesh geometry
         return {
             "terrain_material": material_dict,
             "terrain": {
@@ -1937,7 +2405,6 @@ class EradiateBackend(SimulationBackend):
             else None
         )
 
-        # Create selectbsdf material (common logic extracted)
         _, _, material_dict = self._create_selectbsdf_material(
             "buffer",
             scene_description,
@@ -1948,7 +2415,6 @@ class EradiateBackend(SimulationBackend):
 
         result = {"buffer_material": material_dict}
 
-        # Handle optional mask
         buffer_bsdf_id = "buffer_material"
         from s2gos_utils.io.paths import exists
 
@@ -1972,7 +2438,6 @@ class EradiateBackend(SimulationBackend):
             }
             buffer_bsdf_id = "buffer_mask"
 
-        # Create buffer mesh geometry
         result["buffer_terrain"] = {
             "type": "ply",
             "filename": str(buffer_mesh_path),
@@ -1994,7 +2459,6 @@ class EradiateBackend(SimulationBackend):
         background_texture_path = scene_dir / background_config["selection_texture"]
         background_size_km = background_config["size_km"]
 
-        # Create selectbsdf material (common logic extracted)
         _, _, material_dict = self._create_selectbsdf_material(
             "background",
             scene_description,
@@ -2003,7 +2467,6 @@ class EradiateBackend(SimulationBackend):
             hamster_available,
         )
 
-        # Create background rectangle geometry with transform
         scale_factor = (background_size_km * 1000) / 2.0
         to_world = mi.ScalarTransform4f.translate(
             [0, 0, elevation]
@@ -2071,11 +2534,9 @@ class EradiateBackend(SimulationBackend):
             if "radiance" in sensor_data:
                 radiance_data = sensor_data["radiance"]
                 if "x_index" in radiance_data.dims and "y_index" in radiance_data.dims:
-                    # Handle 2D imagery data
                     wavelengths = radiance_data.coords["w"].values
 
                     if len(wavelengths) >= 3:
-                        # Multi-band data - create RGB image
                         target_wavelengths = [660, 550, 440]
                         actual_wavelengths = [
                             radiance_data.sel(w=w_val, method="nearest").w.item()
@@ -2098,9 +2559,7 @@ class EradiateBackend(SimulationBackend):
                         plt_img = (img * 255).astype(np.uint8)
                         print(f"RGB image saved to: {rgb_output}")
                     else:
-                        # Single-band data - create grayscale image
                         img_data = radiance_data.squeeze().values
-                        # Normalize to 0-1 range
                         img_normalized = (img_data - img_data.min()) / (
                             img_data.max() - img_data.min()
                         )
@@ -2109,7 +2568,6 @@ class EradiateBackend(SimulationBackend):
                         rgb_output = output_dir / f"{id_to_plot}_grayscale.png"
                         print(f"Grayscale image saved to: {rgb_output}")
 
-                    # Save the image
                     rgb_image = Image.fromarray(plt_img)
                     with open_file(rgb_output, "wb") as f:
                         rgb_image.save(f, format="PNG")
@@ -2160,7 +2618,6 @@ class EradiateBackend(SimulationBackend):
 
         metadata = self._create_output_metadata(output_dir)
 
-        # Process regular sensor results - each measure saves to separate file
         if isinstance(results, dict):
             print(f"Processing {len(results)} measure results...")
             for sensor_id, dataset in results.items():
@@ -2180,16 +2637,6 @@ class EradiateBackend(SimulationBackend):
             results_ds.attrs.update(metadata)
             results_ds.to_zarr(single_output, mode="w")
             print(f"Results saved to {single_output}")
-
-        # Generate dummy results for radiative quantities (TODO placeholders)
-        print(self.simulation_config.radiative_quantities)
-        # for rad_quantity in self.simulation_config.radiative_quantities:
-        #     dummy_output = self._create_dummy_radiative_quantity_result(
-        #         rad_quantity, output_dir, metadata
-        #     )
-        #     print(
-        #         f"TODO: {rad_quantity.quantity.value.upper()} placeholder saved to {dummy_output}"
-        #     )
 
         return results
 
@@ -2298,17 +2745,14 @@ class EradiateBackend(SimulationBackend):
         quantity_id = f"{rad_quantity.quantity.value}_measure"
         dummy_output = output_dir / f"{self.simulation_config.name}_{quantity_id}.zarr"
 
-        # Create dummy data
         dummy_data = np.ones((10, 10)) * 0.5
 
-        wavelengths = [550.0]  # Set a default value
+        wavelengths = [550.0]
         srf = rad_quantity.srf
         if srf.type == "delta" and srf.wavelengths:
             wavelengths = srf.wavelengths
 
-        # Create xarray dataset with appropriate structure
         if len(wavelengths) > 1:
-            # Multi-spectral data
             dummy_values = np.stack([dummy_data for _ in wavelengths], axis=0)
             coords = {
                 "wavelength": ("wavelength", wavelengths),
@@ -2317,17 +2761,14 @@ class EradiateBackend(SimulationBackend):
             }
             dims = ["wavelength", "y", "x"]
         else:
-            # Single wavelength
             dummy_values = dummy_data
             coords = {"x": ("x", np.arange(10)), "y": ("y", np.arange(10))}
             dims = ["y", "x"]
 
-        # Create dataset
         dummy_dataset = xr.Dataset(
             {rad_quantity.quantity.value: (dims, dummy_values)}, coords=coords
         )
 
-        # Add metadata
         dummy_dataset.attrs.update(metadata)
         dummy_dataset.attrs.update(
             {
@@ -2340,7 +2781,6 @@ class EradiateBackend(SimulationBackend):
             }
         )
 
-        # Save as Zarr
         dummy_dataset.to_zarr(dummy_output, mode="w")
 
         return dummy_output

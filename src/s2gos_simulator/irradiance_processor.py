@@ -1,7 +1,7 @@
-"""BOA irradiance measurement using white reference disk technique.
+"""BOA irradiance measurement using reference disk technique.
 
 Measures downward irradiance at BOA by:
-1. Placing a small white Lambertian disk (ρ=1.0) at target location
+1. Placing a small reference disk with Lambertian reflectance (ρ=1.0) at target location
 2. Running simulation with hemispherical distant sensor
 3. Converting measured radiance to irradiance: E = π × L_mean
 """
@@ -20,7 +20,7 @@ REFERENCE_DISK_RADIUS_M = 0.01  # 1cm radius for consistent BOA measurement
 
 
 class IrradianceProcessor:
-    """Processor for BOA irradiance measurements using white reference disk technique."""
+    """Processor for BOA irradiance measurements using reference disk technique."""
 
     def __init__(self, backend):
         self.backend = backend
@@ -28,7 +28,11 @@ class IrradianceProcessor:
 
     def requires_irradiance(self) -> bool:
         """Check if any irradiance measurements are configured."""
-        return len(self.simulation_config.irradiance_measurements) > 0
+        from .config import IrradianceConfig
+
+        return any(
+            isinstance(m, IrradianceConfig) for m in self.simulation_config.measurements
+        )
 
     def _to_scene_coords(
         self, lat: float, lon: float, scene: SceneDescription
@@ -40,6 +44,17 @@ class IrradianceProcessor:
             scene.location["center_lat"], scene.location["center_lon"]
         )
         return coord_sys.latlon_to_scene(lat, lon)
+
+    def _to_lat_lon_coords(
+        self, x: float, y: float, scene: SceneDescription
+    ) -> Tuple[float, float]:
+        """Convert lat/lon to scene XY coordinates."""
+        from s2gos_utils.coordinates import CoordinateSystem
+
+        coord_sys = CoordinateSystem(
+            scene.location["center_lat"], scene.location["center_lon"]
+        )
+        return coord_sys.scene_to_latlon(x, y)
 
     def _get_disk_elevation(
         self,
@@ -67,8 +82,7 @@ class IrradianceProcessor:
         self,
         scene_description: SceneDescription,
         scene_dir: UPath,
-        target_lat: float,
-        target_lon: float,
+        location,
         height_offset_m: float,
         disk_id: str = "boa_irradiance_disk",
     ) -> Tuple[SceneDescription, Tuple[float, float, float]]:
@@ -83,7 +97,8 @@ class IrradianceProcessor:
         if height_offset_m < 0:
             raise ValueError(f"height_offset_m must be >= 0, got {height_offset_m}")
 
-        # Validate coordinates
+        target_lat, target_lon = location.target_lat, location.target_lon
+
         tq = TerrainQuery(scene_description, scene_dir)
         if not tq.validate_coordinate_bounds(
             target_lat, target_lon, max_distance_km=50.0
@@ -93,13 +108,26 @@ class IrradianceProcessor:
             )
 
         # Get disk position
-        x, y = self._to_scene_coords(target_lat, target_lon, scene_description)
-        z = self._get_disk_elevation(
-            scene_description, scene_dir, target_lat, target_lon, height_offset_m
-        )
+        if location.target_x is None:
+            x, y = self._to_scene_coords(target_lat, target_lon, scene_description)
+            z = self._get_disk_elevation(
+                scene_description, scene_dir, target_lat, target_lon, height_offset_m
+            )
+        else:
+            x, y, z = location.target_x, location.target_y, location.target_z
+            target_lat, target_lon = self._to_lat_lon_coords(x, y, scene_description)
+
+            if location.terrain_relative_height:
+                z = self._get_disk_elevation(
+                    scene_description,
+                    scene_dir,
+                    target_lat,
+                    target_lon,
+                    location.height_offset_m,
+                )
 
         # Create disk object
-        white_disk = {
+        reference_disk = {
             "object_id": disk_id,
             "type": "disk",
             "center": [x, y, z],
@@ -108,16 +136,16 @@ class IrradianceProcessor:
 
         # Shallow copy scene with new objects list (avoid modifying original)
         new_objects = (scene_description.objects or []).copy()
-        new_objects.insert(0, white_disk)
+        new_objects.insert(0, reference_disk)
         disk_scene = replace(scene_description, objects=new_objects)
 
-        logger.info(f"Created white disk at ({x:.1f}, {y:.1f}, {z:.1f})")
+        logger.info(f"Created reference disk at ({x:.1f}, {y:.1f}, {z:.1f})")
         return disk_scene, (x, y, z)
 
     def convert_radiance_to_irradiance(
         self,
         radiance: xr.DataArray,
-        measurement_config: "IrradianceMeasurementConfig" = None,
+        measurement_config: "IrradianceConfig" = None,
     ) -> xr.DataArray:
         """Convert disk radiance to BOA irradiance: E = π × L_mean.
 
@@ -142,14 +170,14 @@ class IrradianceProcessor:
             }
         )
 
-        if measurement_config:
-            E_boa.attrs.update(
-                {
-                    "lat": measurement_config.target_lat,
-                    "lon": measurement_config.target_lon,
-                    "height_offset_m": measurement_config.height_offset_m,
-                }
-            )
+        # if measurement_config:
+        #     E_boa.attrs.update(
+        #         {
+        #             "lat": measurement_config.target_lat,
+        #             "lon": measurement_config.target_lon,
+        #             "height_offset_m": measurement_config.height_offset_m,
+        #         }
+        #     )
 
         return E_boa
 
@@ -173,17 +201,25 @@ class IrradianceProcessor:
             self.backend.irradiance_disk_coords = {}
 
         results = {}
-        for config in self.simulation_config.irradiance_measurements:
-            logger.info(f"\n[{config.id}]")
+        # Filter for IrradianceConfig instances from unified measurements list
+        from .config import IrradianceConfig
 
+        irradiance_configs = [
+            m
+            for m in self.simulation_config.measurements
+            if isinstance(m, IrradianceConfig)
+        ]
+
+        for config in irradiance_configs:
+            logger.info(f"\n[{config.id}]")
+            print(config)
             # Create disk scene
             disk_scene, disk_coords = self.create_reference_disk_scene(
                 scene_description,
                 scene_dir,
-                config.target_lat,
-                config.target_lon,
-                config.height_offset_m,
-                disk_id=config.id,
+                config.location,
+                config.location.height_offset_m,
+                disk_id=f"disk_{config.id}",
             )
             self.backend.irradiance_disk_coords[config.id] = disk_coords
 
