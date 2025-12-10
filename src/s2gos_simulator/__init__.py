@@ -3,7 +3,7 @@
 # Configuration system
 # Import backends with optional dependencies
 from .backends import ERADIATE_AVAILABLE, EradiateSimulator
-from .backends.eradiate_backend import EradiateBackend
+from .backends.eradiate.backend import EradiateBackend
 from .config import (
     AngularFromOriginViewing,
     AngularViewing,

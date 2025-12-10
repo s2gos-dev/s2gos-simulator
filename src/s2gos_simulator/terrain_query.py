@@ -115,7 +115,6 @@ class TerrainQuery:
             with xr.open_zarr(dem_path) as dem_ds:
                 dem_data = dem_ds["elevation"]
 
-                # Create interpolator
                 interpolator = RegularGridInterpolator(
                     (dem_data.y.values, dem_data.x.values),
                     dem_data.values,
@@ -124,7 +123,6 @@ class TerrainQuery:
                     fill_value=0.0,
                 )
 
-                # Query elevation
                 elevation = float(interpolator([(y, x)])[0])
 
             logger.debug(
@@ -174,7 +172,6 @@ class TerrainQuery:
                 logger.warning(msg + " Using 0.0m elevation.")
                 return 0.0
 
-        # Query elevation at scene coordinates
         return self.query_elevation_at_scene_coords(x, y, raise_on_error=raise_on_error)
 
     def latlon_to_scene(self, lat: float, lon: float) -> Tuple[float, float]:
@@ -295,10 +292,6 @@ class TerrainQuery:
 
         return True
 
-    # =========================================================================
-    # HEIGHT RESOLUTION METHODS - Single source of truth for terrain handling
-    # =========================================================================
-
     def resolve_height(
         self,
         x: float,
@@ -307,10 +300,6 @@ class TerrainQuery:
         terrain_relative: bool,
     ) -> float:
         """Resolve z-coordinate to absolute height.
-
-        This is the SINGLE method that should be used for all height resolution
-        throughout the codebase. It handles both absolute and terrain-relative
-        z-coordinates consistently.
 
         Args:
             x: Scene x-coordinate in meters
@@ -321,14 +310,6 @@ class TerrainQuery:
 
         Returns:
             Absolute height in meters
-
-        Example:
-            >>> query = TerrainQuery(scene_desc, scene_dir)
-            >>> # Terrain elevation at (0, 0) is 100m
-            >>> query.resolve_height(0, 0, 2.0, terrain_relative=True)
-            102.0  # 100m terrain + 2m offset
-            >>> query.resolve_height(0, 0, 2.0, terrain_relative=False)
-            2.0    # Absolute elevation
         """
         if not terrain_relative:
             return z
@@ -349,10 +330,6 @@ class TerrainQuery:
     ) -> Tuple[list, Optional[list]]:
         """Resolve origin and target to absolute coordinates.
 
-        This is the SINGLE method that should be used for all origin/target
-        coordinate resolution throughout the codebase. It handles terrain-relative
-        height adjustment for both origin and target consistently.
-
         Args:
             origin_x: Origin x-coordinate in meters
             origin_y: Origin y-coordinate in meters
@@ -367,24 +344,12 @@ class TerrainQuery:
             Tuple of (origin, target) where:
             - origin is [x, y, z] with absolute z
             - target is [x, y, z] with absolute z, or None if no target specified
-
-        Example:
-            >>> query = TerrainQuery(scene_desc, scene_dir)
-            >>> # Resolve sensor at 2m above terrain looking at ground
-            >>> origin, target = query.resolve_origin_target(
-            ...     origin_x=0, origin_y=0, origin_z=2.0,
-            ...     target_x=10, target_y=0, target_z=0,
-            ...     origin_terrain_relative=True,
-            ...     target_terrain_relative=True
-            ... )
         """
-        # Resolve origin height
         abs_origin_z = self.resolve_height(
             origin_x, origin_y, origin_z, origin_terrain_relative
         )
         origin = [origin_x, origin_y, abs_origin_z]
 
-        # Resolve target if provided
         target = None
         if target_x is not None and target_y is not None:
             t_z = target_z if target_z is not None else 0.0

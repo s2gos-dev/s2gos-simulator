@@ -976,13 +976,6 @@ class UAVSensor(BaseSensor):
     viewing: Union[LookAtViewing, AngularFromOriginViewing]
     fov: Optional[float] = Field(None)
     resolution: Optional[List[int]] = Field(None)
-    terrain_relative_height: bool = Field(
-        False,
-        description="If True, z-coordinates are interpreted as offsets from terrain elevation. "
-        "For LookAtViewing, both origin and target z-coordinates are terrain-relative. "
-        "For AngularFromOriginViewing, only origin z-coordinate is terrain-relative. "
-        "If False (default), all z-coordinates are absolute elevations.",
-    )
 
     @model_validator(mode="after")
     def validate_and_set_defaults(self):
@@ -1147,13 +1140,6 @@ class GroundSensor(BaseSensor):
     resolution: Optional[List[int]] = Field(
         None,
         description="Film resolution [width, height] (for camera-like instruments: HYPSTAR, perspective_camera, dhp_camera)",
-    )
-    terrain_relative_height: bool = Field(
-        False,
-        description="If True, z-coordinates are interpreted as offsets from terrain elevation. "
-        "For LookAtViewing, both origin and target z-coordinates are terrain-relative. "
-        "For AngularFromOriginViewing, only origin z-coordinate is terrain-relative. "
-        "If False (default), all z-coordinates are absolute elevations.",
     )
     hypstar_post_processing: Optional[HypstarPostProcessingConfig] = Field(
         None,

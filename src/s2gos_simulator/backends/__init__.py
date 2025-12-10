@@ -1,5 +1,5 @@
 try:
-    from .eradiate_backend import EradiateBackend as EradiateSimulator
+    from .eradiate.backend import EradiateBackend as EradiateSimulator
 
     ERADIATE_AVAILABLE = True
 except ImportError:
