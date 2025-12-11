@@ -1,13 +1,3 @@
-from .post_processor import (
-    WAVELENGTH_COORD_NAMES,
-    PostProcessor,
-    find_wavelength_coord,
-    normalize_wavelength_coord,
-)
+from .sensor_processor import SensorProcessor
 
-__all__ = [
-    "PostProcessor",
-    "find_wavelength_coord",
-    "normalize_wavelength_coord",
-    "WAVELENGTH_COORD_NAMES",
-]
+__all__ = ["SensorProcessor"]

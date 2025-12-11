@@ -530,6 +530,7 @@ class SurfaceBuilder:
             },
             "id": disk_id,
         }
+        print(f"{obj_dict = }")
 
         kdict[disk_id] = obj_dict
 

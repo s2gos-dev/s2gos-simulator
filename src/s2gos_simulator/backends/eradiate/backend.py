@@ -18,6 +18,8 @@ from .result_processor import ResultProcessor
 from .sensor_translator import SensorTranslator
 from .surface_builder import SurfaceBuilder
 from ..base import SimulationBackend
+
+logger = logging.getLogger(__name__)
 from ...config import (
     GroundInstrumentType,
     HCRFConfig,
@@ -66,7 +68,7 @@ class EradiateBackend(SimulationBackend):
         self.atmosphere_builder = AtmosphereBuilder()
         self.surface_builder = SurfaceBuilder()
         self.sensor_translator = SensorTranslator(
-            simulation_config, self.geometry_utils
+            simulation_config, self.geometry_utils, backend=self
         )
         self.result_processor = ResultProcessor(simulation_config)
 
@@ -98,11 +100,8 @@ class EradiateBackend(SimulationBackend):
             List of measurement type strings
         """
         return [
-            "radiance",
-            "brf",
             "hdrf",
-            "bhr_iso",
-            "boa_irradiance",
+            "hcrfboa_irradiance",
         ]
 
     def validate_configuration(self) -> List[str]:
@@ -285,7 +284,15 @@ class EradiateBackend(SimulationBackend):
                 experiment, output_dir, kwargs.get("id_to_plot", "rgb_camera")
             )
 
-        return self.result_processor.process_results(experiment, output_dir)
+        logger.debug(f"Experiment results: {list(experiment.results.keys())}")
+        raw_sensors = experiment.results
+        post_processed = self.sensor_translator.apply_post_processing_to_sensors(
+            raw_sensors
+        )
+        all_results = raw_sensors | post_processed
+        logger.debug(f"All results: {list(all_results.keys())}")
+
+        return self.result_processor.process_results(all_results, output_dir)
 
     def _run_combined_workflow(
         self,
@@ -308,7 +315,7 @@ class EradiateBackend(SimulationBackend):
             Combined results dataset
         """
         print("\n[1/3] Radiance simulation (actual scene)...")
-        actual_results = self._run_standard_simulation(
+        sensor_results = self._run_standard_simulation(
             scene_description,
             scene_dir,
             output_dir / "radiance",
@@ -316,22 +323,12 @@ class EradiateBackend(SimulationBackend):
             **kwargs,
         )
 
-        print("\n[1.5/3] Applying post-processing to sensor results...")
-        actual_dict = (
-            actual_results
-            if isinstance(actual_results, dict)
-            else {"results": actual_results}
-        )
-        actual_dict = self.sensor_translator.apply_post_processing_to_sensors(
-            actual_dict
-        )
-
         print("\n[2/3] BOA irradiance measurements (white disk)...")
         irr_results = irradiance_processor.execute_irradiance_measurements(
             scene_description, scene_dir, output_dir / "boa_irradiance"
         )
 
-        combined_results = {**actual_dict, **irr_results}
+        combined_results = {**sensor_results, **irr_results}
 
         derived_results = self.sensor_translator.compute_derived_measurements(
             combined_results
@@ -426,6 +423,7 @@ class EradiateBackend(SimulationBackend):
             scene_description, scene_dir, include_irradiance_measures
         )
 
+        print(f"{measures =}")
         geometry = self.atmosphere_builder.create_geometry_from_atmosphere(
             scene_description
         )

@@ -821,13 +821,12 @@ class BHRConfig(HemisphericalMeasurementLocation):
     )
 
 
-# Union type with discriminator for type-safe measurement configs
 MeasurementConfig = Annotated[
     Union[
         IrradianceConfig,
         BRFConfig,
-        HDRFConfig,  # Now supports multiple instruments (radiancemeter, perspective, hemispherical)
-        HCRFConfig,  # Hemispherical-Conical Reflectance Factor (camera FOV)
+        HDRFConfig,
+        HCRFConfig,
         RadianceConfig,
         BHRConfig,
     ],
@@ -1085,13 +1084,12 @@ class HypstarPostProcessingConfig(SRFPostProcessingConfig):
         # Basic usage (simulation wavelengths)
         config = HypstarPostProcessingConfig()
 
-        # Validation mode (interpolate to L2A wavelengths)
+        # Validation mode (interpolate to reference wavelengths)
         config = HypstarPostProcessingConfig(
             real_reference_file="HYPERNETS_L_GHNA_L2A_REF_*.nc"
         )
     """
 
-    # Override defaults for HYPSTAR instrument
     fwhm_vnir_nm: float = Field(
         default=3.0, gt=0.0, description="HYPSTAR VNIR FWHM (default 3.0 nm)"
     )
@@ -1099,12 +1097,11 @@ class HypstarPostProcessingConfig(SRFPostProcessingConfig):
         default=10.0, gt=0.0, description="HYPSTAR SWIR FWHM (default 10.0 nm)"
     )
 
-    # L2A reference for wavelength interpolation
     real_reference_file: Optional[str] = Field(
         default=None,
         description=(
-            "Path to HYPSTAR L2A NetCDF file for wavelength grid reference. "
-            "If provided, SRF processing will interpolate to the L2A wavelengths "
+            "Path to HYPSTAR reference NetCDF file for wavelength grid reference. "
+            "If provided, SRF processing will interpolate to the reference wavelengths "
             "instead of simulation wavelengths. This is required for validation "
             "against real HYPSTAR observations to ensure wavelength grids match. "
             "Example: 'HYPERNETS_L_GHNA_L2A_REF_20220517T0743_*.nc'"
@@ -1112,7 +1109,7 @@ class HypstarPostProcessingConfig(SRFPostProcessingConfig):
     )
     wavelength_variable: str = Field(
         default="wavelength",
-        description="Variable name for wavelengths in L2A reference file",
+        description="Variable name for wavelengths in reference file",
     )
 
 

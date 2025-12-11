@@ -22,7 +22,6 @@ VALID_ERADIATE_MODES = {
     "none",
 }
 
-# Variable name mappings for result extraction
 RADIANCE_VARIABLE_NAMES = ["radiance", "L", "l", "rad", "Radiance"]
 IRRADIANCE_VARIABLE_NAMES = [
     "irradiance",
@@ -32,7 +31,5 @@ IRRADIANCE_VARIABLE_NAMES = [
     "Irradiance",
     "boa_irradiance",
 ]
-WAVELENGTH_COORD_NAMES = {"w", "wavelength", "lambda", "wl"}
 
-# Default RGB wavelengths for visualization (nm)
 RGB_WAVELENGTHS_NM = [660, 550, 440]
