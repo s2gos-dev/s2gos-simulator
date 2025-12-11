@@ -145,39 +145,27 @@ class IrradianceProcessor:
     def convert_radiance_to_irradiance(
         self,
         radiance: xr.DataArray,
-        measurement_config: "IrradianceConfig" = None,
     ) -> xr.DataArray:
         """Convert disk radiance to BOA irradiance: E = π × L_mean.
 
         Averages over hemisphere sampling dimensions (from hdistant measure),
         preserves wavelength dimension.
         """
-        # Average over all non-wavelength dims (hemisphere sampling from hdistant measure)
-        wavelength_dims = {"w", "wavelength", "lambda", "wl"}
+        wavelength_dims = {"w", "wavelength"}
         hemisphere_dims = [d for d in radiance.dims if d not in wavelength_dims]
-
+        logger.debug(f"Radiance dims: {radiance.dims}, shape: {radiance.shape}")
         L_mean = radiance.mean(dim=hemisphere_dims) if hemisphere_dims else radiance
         E_boa = np.pi * L_mean  # E = π × L for Lambertian ρ=1.0
 
         logger.info(f"BOA irradiance: mean={float(E_boa.mean()):.3e} W/m²/nm")
 
-        # Minimal metadata
         E_boa.attrs.update(
             {
                 "quantity": "boa_irradiance",
                 "units": "W m^-2 nm^-1",
-                "conversion": "E = π × mean(L)",
+                "conversion": "E = π × mean(L) (where L is from perfect white disk)",
             }
         )
-
-        # if measurement_config:
-        #     E_boa.attrs.update(
-        #         {
-        #             "lat": measurement_config.target_lat,
-        #             "lon": measurement_config.target_lon,
-        #             "height_offset_m": measurement_config.height_offset_m,
-        #         }
-        #     )
 
         return E_boa
 
@@ -212,8 +200,8 @@ class IrradianceProcessor:
 
         for config in irradiance_configs:
             logger.info(f"\n[{config.id}]")
-            print(config)
-            # Create disk scene
+            logger.debug(f"Processing config: {config.id}")
+
             disk_scene, disk_coords = self.create_reference_disk_scene(
                 scene_description,
                 scene_dir,
@@ -240,20 +228,17 @@ class IrradianceProcessor:
             measure_idx = measure_map[config.id]
             eradiate.run(experiment, measures=measure_idx)
 
-            # Extract results (keyed by measure ID string, not index)
             result = experiment.results[config.id]
             if "radiance" not in result:
                 raise RuntimeError(
                     f"No 'radiance' in results. Available: {list(result.data_vars)}"
                 )
 
-            # Convert to irradiance
-            E_boa = self.convert_radiance_to_irradiance(result["radiance"], config)
+            E_boa = self.convert_radiance_to_irradiance(result["radiance"])
 
-            # Include TOA irradiance if available
             dataset_vars = {"boa_irradiance": E_boa}
             if "irradiance" in result:
-                wavelength_dims = {"w", "wavelength", "lambda", "wl"}
+                wavelength_dims = {"w", "wavelength"}
                 E_toa = result["irradiance"]
                 toa_dims = [d for d in E_toa.dims if d not in wavelength_dims]
                 if toa_dims:

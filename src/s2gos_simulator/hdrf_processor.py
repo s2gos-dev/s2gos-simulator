@@ -6,7 +6,6 @@ from s2gos_utils.scene import SceneDescription
 from upath import UPath
 
 from .irradiance_processor import IrradianceProcessor
-from .processors import find_wavelength_coord
 
 logger = logging.getLogger(__name__)
 
@@ -237,19 +236,14 @@ class HDRFProcessor:
                 f"range=[{float(E_reference.min()):.6e}, {float(E_reference.max()):.6e}]"
             )
 
-            # Check wavelength coordinates match (using shared utilities)
-            l_wl_dim = find_wavelength_coord(L_actual)
-            e_wl_dim = find_wavelength_coord(E_reference)
-            l_wl_dim = [l_wl_dim] if l_wl_dim else []
-            e_wl_dim = [e_wl_dim] if e_wl_dim else []
-            if l_wl_dim and e_wl_dim:
+            if "w" in L_actual.dims and "w" in E_reference.dims:
                 logger.info(
-                    f"  L_actual wavelengths: {len(L_actual[l_wl_dim[0]])} points, "
-                    f"range=[{float(L_actual[l_wl_dim[0]].min()):.1f}, {float(L_actual[l_wl_dim[0]].max()):.1f}] nm"
+                    f"  L_actual wavelengths: {len(L_actual.w)} points, "
+                    f"range=[{float(L_actual.w.min()):.1f}, {float(L_actual.w.max()):.1f}] nm"
                 )
                 logger.info(
-                    f"  E_reference wavelengths: {len(E_reference[e_wl_dim[0]])} points, "
-                    f"range=[{float(E_reference[e_wl_dim[0]].min()):.1f}, {float(E_reference[e_wl_dim[0]].max()):.1f}] nm"
+                    f"  E_reference wavelengths: {len(E_reference.w)} points, "
+                    f"range=[{float(E_reference.w.min()):.1f}, {float(E_reference.w.max()):.1f}] nm"
                 )
 
             # Compute HDRF = (π × L_actual) / E_reference

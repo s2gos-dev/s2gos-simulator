@@ -1,58 +1,18 @@
-from typing import Dict, Optional
+from typing import Optional
 
 import numpy as np
 import xarray as xr
 
-WAVELENGTH_COORD_NAMES = {"w", "wavelength", "wl", "lambda"}
 
-
-def find_wavelength_coord(da: xr.DataArray) -> Optional[str]:
-    """Find the wavelength coordinate in a DataArray.
-
-    Searches for common wavelength coordinate names used in Eradiate
-    and other radiative transfer codes.
-
-    Args:
-        da: DataArray to search for wavelength coordinate
-
-    Returns:
-        Name of wavelength coordinate, or None if not found
-    """
-    for name in WAVELENGTH_COORD_NAMES:
-        if name in da.coords:
-            return name
-    return None
-
-
-def normalize_wavelength_coord(da: xr.DataArray, target: str = "w") -> xr.DataArray:
-    """Rename wavelength coordinate to a standard name.
-
-    Args:
-        da: DataArray with wavelength coordinate
-        target: Target coordinate name (default: "w")
-
-    Returns:
-        DataArray with renamed wavelength coordinate, or original if
-        no wavelength coordinate found or already has target name
-    """
-    current = find_wavelength_coord(da)
-    if current is None or current == target:
-        return da
-    return da.rename({current: target})
-
-
-class PostProcessor:
-    """Unified post-processor for all sensor types.
-
-    Centralizes all post-processing logic for simulation results.
-    Dispatches to sensor-specific processing based on sensor type.
+class SensorProcessor:
+    """Unified sensor processor for all sensor types.
 
     Currently supported:
     - HYPSTAR: Gaussian SRF convolution + spatial averaging
     """
 
     def __init__(self, simulation_config):
-        """Initialize post-processor.
+        """Initialize sensor processor.
 
         Args:
             simulation_config: SimulationConfig containing sensor definitions
@@ -73,31 +33,6 @@ class PostProcessor:
             Post-processed dataset with SRF convolution, averaging, etc.
         """
         return self._apply_post_processing(dataset, sensor)
-
-    def process_results(self, results: Dict[str, xr.Dataset]) -> Dict[str, xr.Dataset]:
-        """Apply all post-processing to simulation results.
-
-        Iterates through results and applies sensor-specific post-processing
-        based on the sensor that produced each result.
-
-        Args:
-            results: Dictionary mapping measurement/sensor IDs to xr.Dataset results
-
-        Returns:
-            Dictionary with post-processed results
-        """
-        processed = {}
-
-        for result_id, dataset in results.items():
-            sensor = self._find_sensor_for_result(result_id)
-            if sensor is None:
-                processed[result_id] = dataset
-                continue
-
-            processed_ds = self._apply_post_processing(dataset, sensor)
-            processed[result_id] = processed_ds
-
-        return processed
 
     def _find_sensor_for_result(self, result_id: str):
         """Find sensor associated with a result ID.
@@ -193,18 +128,18 @@ class PostProcessor:
             if config.real_reference_file is not None:
                 try:
                     logger.info(
-                        f"Loading HYPSTAR L2A reference: {config.real_reference_file}"
+                        f"Loading HYPSTAR reference: {config.real_reference_file}"
                     )
 
                     real_reference_ds = xr.open_dataset(config.real_reference_file)
                     target_wavelengths = real_reference_ds[config.wavelength_variable]
                     logger.info(
-                        f"Loaded {len(target_wavelengths)} L2A wavelengths "
+                        f"Loaded {len(target_wavelengths)} wavelengths "
                         f"({float(target_wavelengths.min()):.1f} - "
                         f"{float(target_wavelengths.max()):.1f} nm)"
                     )
                 except Exception as e:
-                    logger.error(f"Failed to load L2A reference: {e}")
+                    logger.error(f"Failed to load HYPSTAR reference: {e}")
                     logger.warning("Falling back to simulation wavelengths")
                     target_wavelengths = None
 
@@ -267,8 +202,7 @@ class PostProcessor:
             fwhm_swir: FWHM for SWIR wavelengths (>=1000nm) in nanometers
             target_wavelengths: Optional target wavelengths for interpolation.
                                If None, uses radiance wavelengths (default).
-                               If provided, applies SRF at each target wavelength
-                               (use for HYPSTAR L2A validation).
+                               If provided, applies SRF at each target wavelength.
 
         Returns:
             Radiance with SRF convolution applied. If target_wavelengths provided,
@@ -286,14 +220,10 @@ class PostProcessor:
                 f"Target range: {wavelengths.min():.1f} - {wavelengths.max():.1f} nm"
             )
         else:
-            w_coord = find_wavelength_coord(radiance)
-            if w_coord is None:
-                logger.warning(
-                    "No wavelength coordinate found, returning original radiance"
-                )
+            if "w" not in radiance.coords:
+                logger.warning("No 'w' coordinate found, returning original radiance")
                 return radiance
-            wavelengths = radiance[w_coord].values
-            logger.debug(f"Using {len(wavelengths)} simulation wavelengths")
+            wavelengths = radiance.w.values
 
         required_coords = {"bin_wmin", "bin_wmax"}
         if not required_coords.issubset(set(radiance.coords.keys())):
@@ -303,13 +233,9 @@ class PostProcessor:
                 f"Eradiate simulations should include bin edge coordinates."
             )
 
-        try:
-            import eradiate
-            from eradiate.pipelines.logic import apply_spectral_response
-            from eradiate.spectral.response import make_gaussian
-        except ImportError as e:
-            logger.error(f"Failed to import eradiate: {e}")
-            return radiance
+        import eradiate
+        from eradiate.pipelines.logic import apply_spectral_response
+        from eradiate.spectral.response import make_gaussian
 
         logger.debug(f"Applying Gaussian SRF: VNIR={fwhm_vnir}nm, SWIR={fwhm_swir}nm")
         processed_values = []

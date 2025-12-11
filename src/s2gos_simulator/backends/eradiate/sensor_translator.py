@@ -4,13 +4,16 @@ This module handles translation of generic sensor configurations to Eradiate-spe
 measure definitions, including post-processing and derived measurement computation.
 """
 
-from typing import Any, Dict, List, Union
+import logging
+from typing import Any, Dict, List, Tuple, Union
 
 import numpy as np
 import xarray as xr
 from s2gos_utils.coordinates import CoordinateSystem
 from s2gos_utils.scene import SceneDescription
 from upath import UPath
+
+logger = logging.getLogger(__name__)
 
 from .constants import IRRADIANCE_VARIABLE_NAMES, RADIANCE_VARIABLE_NAMES
 from .geometry_utils import sanitize_sensor_id
@@ -41,15 +44,17 @@ except ImportError:
 class SensorTranslator:
     """Translator for sensors, measurements, and derived quantities."""
 
-    def __init__(self, simulation_config, geometry_utils):
+    def __init__(self, simulation_config, geometry_utils, backend=None):
         """Initialize sensor translator.
 
         Args:
             simulation_config: SimulationConfig object
             geometry_utils: GeometryUtils instance for coordinate operations
+            backend: Optional backend instance for accessing shared state (e.g., disk_coords)
         """
         self.simulation_config = simulation_config
         self.geometry_utils = geometry_utils
+        self.backend = backend
         self._current_scene_description = None
         self._current_scene_dir = None
 
@@ -120,7 +125,27 @@ class SensorTranslator:
         if include_irradiance_measures:
             for measurement in self.simulation_config.measurements:
                 if isinstance(measurement, IrradianceConfig):
-                    measures.append(self.create_irradiance_measure(measurement))
+                    if self.backend is None or not hasattr(
+                        self.backend, "irradiance_disk_coords"
+                    ):
+                        raise RuntimeError(
+                            f"Cannot create irradiance measure '{measurement.id}': "
+                            f"Backend irradiance_disk_coords not available. "
+                            f"IrradianceProcessor must run before creating measures."
+                        )
+
+                    disk_coords = self.backend.irradiance_disk_coords.get(
+                        measurement.id
+                    )
+                    if disk_coords is None:
+                        raise RuntimeError(
+                            f"Disk coordinates not found for irradiance measurement '{measurement.id}'. "
+                            f"Available measurements: {list(self.backend.irradiance_disk_coords.keys())}"
+                        )
+
+                    measures.append(
+                        self.create_irradiance_measure(measurement, disk_coords)
+                    )
                 elif isinstance(measurement, (HDRFConfig, HCRFConfig)):
                     continue  # Handled in derived measurements
                 else:
@@ -280,6 +305,22 @@ class SensorTranslator:
             base_measure["type"] = "hdistant"
             base_measure["direction"] = [0, 0, 1] if view.upward_looking else [0, 0, -1]
 
+            if view.origin is not None:
+                origin, _ = self.geometry_utils.adjust_origin_target_for_terrain(
+                    view, scene_description, scene_dir
+                )
+                base_measure["target"] = origin
+                logger.debug(
+                    f"HemisphericalViewing sensor '{sensor.id}' target set to {origin}"
+                )
+            else:
+                logger.warning(
+                    f"HemisphericalViewing sensor '{sensor.id}' has no origin. "
+                    f"Using scene center at ground level [0, 0, 0] as target. "
+                    f"This may produce incorrect results."
+                )
+                base_measure["target"] = [0.0, 0.0, 0.0]
+
         elif isinstance(view, (LookAtViewing, AngularFromOriginViewing)):
             origin, target = self.geometry_utils.adjust_origin_target_for_terrain(
                 view, scene_description, scene_dir
@@ -328,24 +369,44 @@ class SensorTranslator:
 
         return base_measure
 
-    def create_irradiance_measure(self, irradiance_config) -> Dict[str, Any]:
-        """Create BOA distant measure for irradiance measurement.
+    def create_irradiance_measure(
+        self, irradiance_config, disk_coords: Tuple[float, float, float]
+    ) -> Dict[str, Any]:
+        """Create hdistant measure for BOA irradiance measurement.
+
+        The target parameter is set to the white reference disk location.
 
         Args:
-            irradiance_config: IrradianceConfig object
+            irradiance_config: IrradianceConfig with measurement parameters
+            disk_coords: Pre-computed disk position (x, y, z) in scene coordinates
 
         Returns:
-            Eradiate measure dictionary
+            Eradiate hdistant measure dictionary with target set to disk location
         """
-        srf = None
         if irradiance_config.location and irradiance_config.location.srf:
             srf = self.translate_srf(irradiance_config.location.srf)
             spp = irradiance_config.location.samples_per_pixel
+        else:
+            srf = {
+                "type": "uniform",
+                "wmin": 380.0,
+                "wmax": 1680.0,
+            }
+            spp = irradiance_config.samples_per_pixel or 512
+
+        x, y, z = disk_coords
+
+        logger.debug(
+            f"Creating hdistant measure '{irradiance_config.id}' with target at "
+            f"({x:.2f}, {y:.2f}, {z:.2f}) m, spp={spp}, ray_offset=0.1m"
+        )
 
         return {
             "type": "hdistant",
             "id": sanitize_sensor_id(irradiance_config.id),
-            "direction": [0, 0, 1],  # Upward looking
+            "target": [x, y, z],  # Point at disk location
+            "direction": [0, 0, 1],  # Upward-looking hemisphere
+            "ray_offset": 0.1,  # Small offset to prevent self-intersection
             "srf": srf,
             "spp": spp,
         }
@@ -540,20 +601,27 @@ class SensorTranslator:
         Returns:
             Dictionary of post-processed results
         """
-        from ...processors.post_processor import PostProcessor
+        from ...processors.sensor_processor import SensorProcessor
 
-        post_processor = PostProcessor(self.simulation_config)
+        sensor_processor = SensorProcessor(self.simulation_config)
         processed_results = {}
 
         for sensor_id, dataset in sensor_results.items():
+            logger.debug(f"Processing sensor: {sensor_id}")
             sensor = self.get_sensor_by_id(sensor_id)
             if sensor:
-                processed_results[sensor_id] = post_processor.process_sensor_result(
+                logger.debug(f"Found sensor config: {sensor_id}")
+                post_processed_dataset = sensor_processor.process_sensor_result(
                     dataset, sensor
                 )
+                # Only save raw version if post-processing changed the data
+                if post_processed_dataset is not dataset:
+                    logger.debug(f"Post-processing applied: {sensor_id}")
+                    processed_results[f"{sensor_id}_raw_eradiate"] = dataset
+                processed_results[sensor_id] = post_processed_dataset
             else:
+                logger.debug(f"No sensor config found: {sensor_id}, passing through")
                 processed_results[sensor_id] = dataset
-
         return processed_results
 
     def compute_derived_measurements(
@@ -674,9 +742,7 @@ class SensorTranslator:
         if set(L.dims) - set(E.dims):
             E = E.broadcast_like(L)
 
-        # Compute HCRF = π × L / E (with epsilon for stability)
-        epsilon = 1e-10
-        hcrf = (np.pi * L) / (E + epsilon)
+        hcrf = (np.pi * L) / E
 
         hcrf_ds = xr.Dataset(
             {"hcrf": hcrf},
@@ -687,29 +753,7 @@ class SensorTranslator:
             },
         )
 
-        # Apply post-processing if configured
-        if hcrf_config.post_processing:
-            hcrf_ds = self.apply_hcrf_post_processing(
-                hcrf_ds, hcrf_config.post_processing
-            )
-
         return hcrf_ds
-
-    def apply_hcrf_post_processing(
-        self, dataset: xr.Dataset, post_processing_config
-    ) -> xr.Dataset:
-        """Apply post-processing to HCRF dataset.
-
-        Args:
-            dataset: HCRF dataset
-            post_processing_config: Post-processing configuration
-
-        Returns:
-            Post-processed HCRF dataset
-        """
-        # Apply any configured post-processing steps
-        # This is a placeholder for future implementation
-        return dataset
 
     def extract_radiance_variable(self, dataset: xr.Dataset) -> xr.DataArray:
         """Extract radiance variable from dataset.

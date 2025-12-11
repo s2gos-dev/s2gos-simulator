@@ -29,7 +29,7 @@ class ResultProcessor:
         """
         self.simulation_config = simulation_config
 
-    def process_results(self, experiment, output_dir: UPath) -> xr.Dataset:
+    def process_results(self, results, output_dir: UPath) -> xr.Dataset:
         """Process and save simulation results.
 
         Args:
@@ -42,7 +42,6 @@ class ResultProcessor:
         Raises:
             ValueError: If no results found in experiment
         """
-        results = experiment.results
 
         if not results:
             raise ValueError("No results found in experiment")
@@ -267,11 +266,6 @@ class ResultProcessor:
         self, rad_quantity, output_dir: UPath, metadata: dict
     ) -> UPath:
         """Create dummy Zarr file for radiative quantity placeholder.
-
-        TODO: This creates placeholder data. Future implementation will:
-        1. Use results from appropriate sensors
-        2. Calculate the actual radiative quantity
-        3. Return real calculated values
 
         Args:
             rad_quantity: Radiative quantity configuration
