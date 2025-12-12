@@ -18,8 +18,6 @@ from .result_processor import ResultProcessor
 from .sensor_translator import SensorTranslator
 from .surface_builder import SurfaceBuilder
 from ..base import SimulationBackend
-
-logger = logging.getLogger(__name__)
 from ...config import (
     GroundInstrumentType,
     HCRFConfig,
@@ -27,6 +25,9 @@ from ...config import (
     PlatformType,
     SimulationConfig,
 )
+
+logger = logging.getLogger(__name__)
+
 
 try:
     import eradiate

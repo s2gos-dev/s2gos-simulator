@@ -1,7 +1,11 @@
 """Atmosphere configuration builder for Eradiate backend."""
 
+import logging
+
 import numpy as np
 from s2gos_utils.scene import SceneDescription
+
+logger = logging.getLogger(__name__)
 
 try:
     from eradiate.radprops import AbsorptionDatabase
@@ -38,7 +42,7 @@ class AtmosphereBuilder:
             Geometry dictionary with TOA altitude
         """
         atmosphere = scene_description.atmosphere
-        toa = atmosphere["toa"] if "toa" in atmosphere else 40000.0
+        toa = atmosphere["toa"]
 
         geometry = {
             "type": "plane_parallel",
@@ -95,15 +99,14 @@ class AtmosphereBuilder:
             thermoprops_id = mol_dict.get(
                 "thermoprops_identifier", "afgl_1986-us_standard"
             )
-            altitude_min = mol_dict.get("altitude_min", 0.0)
-            altitude_max = mol_dict.get("altitude_max", 120000.0)
-            num_steps = (
-                (altitude_max - altitude_min) / mol_dict.get("altitude_step", 1000)
-            ) + 1
+            altitude_min = mol_dict["altitude_min"]
+            altitude_max = mol_dict["altitude_max"]
+            altitude_step = mol_dict["altitude_step"]
+            num_steps = int((altitude_max - altitude_min) / altitude_step) + 1
 
             thermoprops = {
                 "identifier": thermoprops_id,
-                "z": np.linspace(altitude_min, altitude_max, int(num_steps)) * ureg.m,
+                "z": np.linspace(altitude_min, altitude_max, num_steps) * ureg.m,
             }
 
         absorption_data = (
@@ -128,12 +131,15 @@ class AtmosphereBuilder:
         Returns:
             ParticleLayer object
         """
-        dist_type = layer_dict.get("distribution_type", "exponential")
+        # Core fields always present from config
+        dist_type = layer_dict["distribution_type"]  # Always serialized
+
         if dist_type == "exponential":
+            # Distribution params are optional, use defaults if not present
             if "rate" in layer_dict.keys():
                 if "scale" in layer_dict.keys():
-                    print(
-                        "WARNING: scale and rate should be mutually exclusive in exponential distribution, using rate"
+                    logger.warning(
+                        "scale and rate should be mutually exclusive in exponential distribution, using rate"
                     )
                 distribution = ExponentialParticleDistribution(
                     scale=layer_dict.get("rate", 5.0)
@@ -143,6 +149,7 @@ class AtmosphereBuilder:
                     rate=layer_dict.get("scale", 0.2)
                 )
         elif dist_type == "gaussian":
+            # Gaussian params may not be present, use defaults
             distribution = GaussianParticleDistribution(
                 mean=layer_dict.get("center_altitude", 0.5),
                 std=layer_dict.get("width", 1 / 6),
@@ -155,11 +162,11 @@ class AtmosphereBuilder:
         layer = ParticleLayer(
             dataset=layer_dict["aerosol_dataset"],
             tau_ref=layer_dict["optical_thickness"],
-            w_ref=layer_dict.get("reference_wavelength", 550.0),
+            w_ref=layer_dict["reference_wavelength"],
             bottom=layer_dict["altitude_bottom"],
             top=layer_dict["altitude_top"],
             distribution=distribution,
-            has_absorption=layer_dict.get("has_absorption", True),
+            has_absorption=layer_dict["has_absorption"],
         )
 
         return layer
@@ -189,15 +196,15 @@ class AtmosphereBuilder:
             HomogeneousAtmosphere object
         """
         atmosphere = HomogeneousAtmosphere(
-            boa=atmosphere_dict.get("boa", 0.0),
-            toa=atmosphere_dict.get("toa", 40000.0),
+            boa=atmosphere_dict["boa"],
+            toa=atmosphere_dict["toa"],
             particle_layers=[
                 ParticleLayer(
-                    dataset=atmosphere_dict.get("aerosol_ds", "sixsv-continental"),
-                    optical_thickness=atmosphere_dict.get("aerosol_ot", 0.1),
-                    altitude_bottom=atmosphere_dict.get("boa", 0.0),
-                    altitude_top=atmosphere_dict.get("toa", 40000.0),
-                    reference_wavelength=550.0,
+                    dataset=atmosphere_dict["aerosol_ds"],
+                    optical_thickness=atmosphere_dict["aerosol_ot"],
+                    altitude_bottom=atmosphere_dict["boa"],
+                    altitude_top=atmosphere_dict["toa"],
+                    reference_wavelength=atmosphere_dict["reference_wavelength"],
                 )
             ],
         )

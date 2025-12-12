@@ -1,4 +1,3 @@
-from dynaconf import Validator
 from s2gos_utils.setting import settings as util_settings
 
 # Validate Simulator config
