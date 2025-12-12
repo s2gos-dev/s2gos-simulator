@@ -13,9 +13,6 @@ from s2gos_utils.coordinates import CoordinateSystem
 from s2gos_utils.scene import SceneDescription
 from upath import UPath
 
-logger = logging.getLogger(__name__)
-
-from .constants import IRRADIANCE_VARIABLE_NAMES, RADIANCE_VARIABLE_NAMES
 from .geometry_utils import sanitize_sensor_id
 from ...config import (
     AngularFromOriginViewing,
@@ -39,6 +36,8 @@ try:
     ERADIATE_AVAILABLE = True
 except ImportError:
     ERADIATE_AVAILABLE = False
+
+logger = logging.getLogger(__name__)
 
 
 class SensorTranslator:
@@ -688,8 +687,8 @@ class SensorTranslator:
         Returns:
             HDRF dataset
         """
-        L_actual = self.extract_radiance_variable(radiance_dataset)
-        E_reference = self.extract_irradiance_variable(irradiance_dataset)
+        L_actual = radiance_dataset["radiance"]
+        E_reference = irradiance_dataset["boa_irradiance"]
 
         # Ensure wavelength alignment
         if "w" in L_actual.dims and "w" in E_reference.dims:
@@ -730,8 +729,8 @@ class SensorTranslator:
         Returns:
             HCRF dataset
         """
-        L = self.extract_radiance_variable(radiance_dataset)
-        E = self.extract_irradiance_variable(irradiance_dataset)
+        L = radiance_dataset["radiance"]
+        E = irradiance_dataset["boa_irradiance"]
 
         # Ensure wavelength alignment
         if "w" in L.dims and "w" in E.dims:
@@ -754,43 +753,3 @@ class SensorTranslator:
         )
 
         return hcrf_ds
-
-    def extract_radiance_variable(self, dataset: xr.Dataset) -> xr.DataArray:
-        """Extract radiance variable from dataset.
-
-        Args:
-            dataset: Dataset containing radiance
-
-        Returns:
-            Radiance DataArray
-
-        Raises:
-            ValueError: If no radiance variable found
-        """
-        for var_name in RADIANCE_VARIABLE_NAMES:
-            if var_name in dataset:
-                return dataset[var_name]
-
-        raise ValueError(
-            f"No radiance variable found in dataset. Looked for: {RADIANCE_VARIABLE_NAMES}"
-        )
-
-    def extract_irradiance_variable(self, dataset: xr.Dataset) -> xr.DataArray:
-        """Extract irradiance variable from dataset.
-
-        Args:
-            dataset: Dataset containing irradiance
-
-        Returns:
-            Irradiance DataArray
-
-        Raises:
-            ValueError: If no irradiance variable found
-        """
-        for var_name in IRRADIANCE_VARIABLE_NAMES:
-            if var_name in dataset:
-                return dataset[var_name]
-
-        raise ValueError(
-            f"No irradiance variable found in dataset. Looked for: {IRRADIANCE_VARIABLE_NAMES}"
-        )

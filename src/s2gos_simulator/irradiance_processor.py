@@ -48,7 +48,7 @@ class IrradianceProcessor:
     def _to_lat_lon_coords(
         self, x: float, y: float, scene: SceneDescription
     ) -> Tuple[float, float]:
-        """Convert lat/lon to scene XY coordinates."""
+        """Convert scene XY coordinates to lat/lon."""
         from s2gos_utils.coordinates import CoordinateSystem
 
         coord_sys = CoordinateSystem(
@@ -151,8 +151,7 @@ class IrradianceProcessor:
         Averages over hemisphere sampling dimensions (from hdistant measure),
         preserves wavelength dimension.
         """
-        wavelength_dims = {"w", "wavelength"}
-        hemisphere_dims = [d for d in radiance.dims if d not in wavelength_dims]
+        hemisphere_dims = [d for d in radiance.dims if d != "w"]
         logger.debug(f"Radiance dims: {radiance.dims}, shape: {radiance.shape}")
         L_mean = radiance.mean(dim=hemisphere_dims) if hemisphere_dims else radiance
         E_boa = np.pi * L_mean  # E = π × L for Lambertian ρ=1.0
@@ -238,9 +237,8 @@ class IrradianceProcessor:
 
             dataset_vars = {"boa_irradiance": E_boa}
             if "irradiance" in result:
-                wavelength_dims = {"w", "wavelength"}
                 E_toa = result["irradiance"]
-                toa_dims = [d for d in E_toa.dims if d not in wavelength_dims]
+                toa_dims = [d for d in E_toa.dims if d != "w"]
                 if toa_dims:
                     E_toa = E_toa.mean(dim=toa_dims)
                 E_toa.attrs.update(

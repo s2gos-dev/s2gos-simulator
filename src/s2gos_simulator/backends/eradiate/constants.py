@@ -22,14 +22,4 @@ VALID_ERADIATE_MODES = {
     "none",
 }
 
-RADIANCE_VARIABLE_NAMES = ["radiance", "L", "l", "rad", "Radiance"]
-IRRADIANCE_VARIABLE_NAMES = [
-    "irradiance",
-    "E",
-    "e",
-    "irr",
-    "Irradiance",
-    "boa_irradiance",
-]
-
 RGB_WAVELENGTHS_NM = [660, 550, 440]

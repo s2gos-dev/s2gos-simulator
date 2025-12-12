@@ -107,11 +107,7 @@ class SensorProcessor:
 
         result = dataset.copy()
 
-        radiance_var = self._find_radiance_variable(result)
-        if radiance_var is None:
-            return result
-
-        radiance = result[radiance_var]
+        radiance = result["radiance"]
 
         if getattr(config, "spatial_averaging", True):
             radiance = self._apply_spatial_averaging(radiance)
@@ -151,24 +147,10 @@ class SensorProcessor:
             )
 
         result = xr.Dataset(
-            {radiance_var: radiance},
+            {"radiance": radiance},
             attrs={**result.attrs, "hypstar_post_processed": True},
         )
         return result
-
-    def _find_radiance_variable(self, dataset: xr.Dataset) -> Optional[str]:
-        """Find the radiance variable in a dataset.
-
-        Args:
-            dataset: Dataset to search
-
-        Returns:
-            Name of radiance variable, or None if not found
-        """
-        for var in ["radiance", "L", "l"]:
-            if var in dataset:
-                return var
-        return None
 
     def _apply_spatial_averaging(self, radiance: xr.DataArray) -> xr.DataArray:
         """Average over spatial dimensions (FOV pixels).
@@ -179,9 +161,7 @@ class SensorProcessor:
         Returns:
             Radiance averaged over spatial dimensions
         """
-        spatial_dims = [
-            d for d in ["x_index", "y_index", "x", "y"] if d in radiance.dims
-        ]
+        spatial_dims = [d for d in ["x_index", "y_index"] if d in radiance.dims]
         if spatial_dims:
             return radiance.mean(dim=spatial_dims)
         return radiance
