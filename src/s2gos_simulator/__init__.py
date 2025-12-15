@@ -3,18 +3,25 @@
 # Configuration system
 # Import backends with optional dependencies
 from .backends import ERADIATE_AVAILABLE, EradiateSimulator
-from .backends.eradiate_backend import EradiateBackend
+from .backends.eradiate.backend import EradiateBackend
 from .config import (
     AngularFromOriginViewing,
     AngularViewing,
+    BHRConfig,
+    BRFConfig,
     ConstantIllumination,
     DirectionalIllumination,
     GroundInstrumentType,
     GroundSensor,
+    HCRFConfig,
+    HCRFPostProcessingConfig,
+    HDRFConfig,
+    HemisphericalMeasurementLocation,
     HemisphericalViewing,
+    IrradianceConfig,
     LookAtViewing,
-    MeasurementType,
     PlatformType,
+    RadianceConfig,
     SatelliteSensor,
     SimulationConfig,
     SpectralResponse,
@@ -37,11 +44,20 @@ __all__ = [
     "AngularFromOriginViewing",
     "LookAtViewing",
     "HemisphericalViewing",
+    "HemisphericalMeasurementLocation",
     "SpectralResponse",
     "PlatformType",
-    "MeasurementType",
     "UAVInstrumentType",
     "GroundInstrumentType",
+    # Measurement Configs
+    "IrradianceConfig",
+    "HDRFConfig",
+    "HCRFConfig",
+    "HCRFPostProcessingConfig",
+    "BRFConfig",
+    "RadianceConfig",
+    "BHRConfig",
+    # Backends and Processors
     "EradiateSimulator",
     "EradiateBackend",
     "ERADIATE_AVAILABLE",
