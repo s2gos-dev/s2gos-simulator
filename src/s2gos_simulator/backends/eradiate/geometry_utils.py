@@ -190,3 +190,32 @@ class GeometryUtils:
             target, _ = self.calculate_target_from_angles(viewing)
 
         return origin, target
+
+
+def apply_asset_relative_transform(
+    relative_position: list[float],
+    asset_transform: "AssetTransform",
+) -> list[float]:
+    """Transform position from asset local space to scene space.
+
+    Applies rotation, scale, and translation from asset transform.
+
+    Args:
+        relative_position: [x, y, z] offset in asset's local coordinate system
+        asset_transform: Asset's transform (position, rotation, scale)
+
+    Returns:
+        Absolute position [x, y, z] in scene coordinates
+    """
+    from scipy.spatial.transform import Rotation
+
+    rel_pos = np.array(relative_position, dtype=float)
+
+    rx, ry, rz = asset_transform.rotation
+    rotation = Rotation.from_euler("xyz", [rx, ry, rz], degrees=True)
+
+    rotated = rotation.apply(rel_pos)
+    scaled = rotated * asset_transform.scale
+    absolute = scaled + np.array(asset_transform.position)
+
+    return absolute.tolist()

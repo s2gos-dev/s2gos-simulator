@@ -17,6 +17,7 @@ dependencies = [
     "xarray>=2023.1.0,<2025",
     "zarr>=2.18,<3.0",
     "skyfield>=1.40.0",
+    "scipy>=1.9.0",
 ]
 
 [project.optional-dependencies]

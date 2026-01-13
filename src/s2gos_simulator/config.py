@@ -335,6 +335,14 @@ class AngularFromOriginViewing(BaseViewing):
             "If False (default), z-coordinate is absolute elevation in scene coordinate system."
         ),
     )
+    relative_to_asset: Optional[str] = Field(
+        default=None,
+        description=(
+            "Asset ID to use as reference frame. When set, origin is "
+            "interpreted as an offset in the asset's local coordinate system "
+            "and transformed by the asset's position, rotation, and scale."
+        ),
+    )
 
 
 class LookAtViewing(BaseViewing):
@@ -361,6 +369,14 @@ class LookAtViewing(BaseViewing):
             "If True, z-coordinates in origin and target are offsets from terrain surface. "
             "Backend will query DEM elevation at (x, y) and add z offset. "
             "If False (default), z-coordinates are absolute elevations in scene coordinate system."
+        ),
+    )
+    relative_to_asset: Optional[str] = Field(
+        default=None,
+        description=(
+            "Asset ID to use as reference frame. When set, origin and target "
+            "are interpreted as offsets in the asset's local coordinate system "
+            "and transformed by the asset's position, rotation, and scale."
         ),
     )
 

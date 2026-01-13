@@ -5,7 +5,7 @@ measure definitions, including post-processing and derived measurement computati
 """
 
 import logging
-from typing import Any, Dict, List, Tuple, Union
+from typing import Any, Dict, List, NamedTuple, Tuple, Union
 
 import numpy as np
 import xarray as xr
@@ -13,7 +13,7 @@ from s2gos_utils.coordinates import CoordinateSystem
 from s2gos_utils.scene import SceneDescription
 from upath import UPath
 
-from .geometry_utils import sanitize_sensor_id
+from .geometry_utils import apply_asset_relative_transform, sanitize_sensor_id
 from ...config import (
     AngularFromOriginViewing,
     ConstantIllumination,
@@ -38,6 +38,20 @@ except ImportError:
     ERADIATE_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
+
+
+class _AssetTransform(NamedTuple):
+    """Internal: Transform information for a positioned asset.
+
+    Used to resolve sensor positions specified relative to assets.
+    Rotation contains USER-SPECIFIED rotations only, NOT including
+    the internal Blender coordinate fix (90° X rotation).
+    """
+
+    object_id: str
+    position: tuple[float, float, float]
+    rotation: tuple[float, float, float]
+    scale: float
 
 
 class SensorTranslator:
@@ -85,6 +99,112 @@ class SensorTranslator:
         else:
             raise ValueError(f"Unsupported illumination type: {type(illumination)}")
 
+    def _extract_asset_transforms(
+        self, scene_description: SceneDescription
+    ) -> Dict[str, _AssetTransform]:
+        """Extract asset transforms from scene description (backend-internal).
+
+        Reads blender_fix metadata to reverse coordinate fix and get user rotations.
+
+        Args:
+            scene_description: SceneDescription with positioned assets
+
+        Returns:
+            Dict mapping object_id to _AssetTransform
+        """
+        asset_transforms = {}
+
+        for obj in scene_description.objects:
+            if not isinstance(obj, dict):
+                continue
+            if "position" not in obj or "rotation" not in obj or "scale" not in obj:
+                continue
+            if obj.get("type") in ["vegetation_collection", "shapegroup"]:
+                continue
+
+            final_rotation = obj["rotation"]
+            blender_fix = obj.get("blender_fix", False)
+
+            if blender_fix:
+                user_rotation_x = final_rotation[0] - 90.0
+                user_rotation_z = final_rotation[1]
+                user_rotation_y = -final_rotation[2]
+                user_rotation = (user_rotation_x, user_rotation_y, user_rotation_z)
+            else:
+                user_rotation = tuple(final_rotation)
+
+            asset_transforms[obj["id"]] = _AssetTransform(
+                object_id=obj["id"],
+                position=tuple(obj["position"]),
+                rotation=user_rotation,
+                scale=obj.get("scale", 1.0),
+            )
+
+        return asset_transforms
+
+    def _resolve_asset_reference(
+        self, reference: str, asset_transforms: Dict[str, _AssetTransform]
+    ) -> str:
+        """Resolve user-friendly asset reference to actual object ID.
+
+        Handles extensions and prefix matching for intuitive asset referencing.
+
+        Args:
+            reference: User reference like "tower_v0_1.xml", "my_asset.ply", or "exact_id"
+            asset_transforms: Dict of available asset transforms
+
+        Returns:
+            Resolved object_id
+
+        Raises:
+            ValueError: If reference cannot be resolved
+        """
+        # 1. Try exact match first (for exact IDs without extensions)
+        if reference in asset_transforms:
+            return reference
+
+        # 2. Strip extension if present
+        if reference.endswith(".xml") or reference.endswith(".ply"):
+            reference_stem = reference.rsplit(".", 1)[0]
+        else:
+            reference_stem = reference
+
+        # 3. Try exact match with stem
+        if reference_stem in asset_transforms:
+            return reference_stem
+
+        # 4. If original had .xml extension, find first asset with prefix
+        if reference.endswith(".xml"):
+            prefix = reference_stem + "_"
+            matches = [oid for oid in asset_transforms if oid.startswith(prefix)]
+            if matches:
+                matches.sort()
+                logger.info(
+                    f"Resolved '{reference}' to '{matches[0]}' (first of {len(matches)} matches)"
+                )
+                return matches[0]
+
+        # 5. Not found - provide error
+        available = sorted(asset_transforms.keys())
+        if reference.endswith(".xml"):
+            prefix = reference_stem + "_"
+            xml_assets = [a for a in available if a.startswith(prefix)]
+            if xml_assets:
+                raise ValueError(
+                    f"Asset reference '{reference}' matches {len(xml_assets)} assets with prefix '{prefix}'. "
+                    f"Matches: {xml_assets[:5]}... Use full object_id for specific asset."
+                )
+            else:
+                raise ValueError(
+                    f"No assets found for XML '{reference}'. "
+                    f"Available assets: {available[:10]}{'...' if len(available) > 10 else ''}"
+                )
+        else:
+            raise ValueError(
+                f"Asset '{reference}' not found. "
+                f"Available: {available[:10]}{'...' if len(available) > 10 else ''}"
+            )
+
     def translate_sensors(
         self,
         scene_description: SceneDescription,
@@ -103,6 +223,9 @@ class SensorTranslator:
         """
         self._current_scene_description = scene_description
         self._current_scene_dir = scene_dir
+
+        asset_transforms = self._extract_asset_transforms(scene_description)
+
         measures = []
 
         for sensor in self.simulation_config.sensors:
@@ -112,11 +235,15 @@ class SensorTranslator:
                 )
             elif isinstance(sensor, UAVSensor):
                 measures.append(
-                    self.translate_uav_sensor(sensor, scene_description, scene_dir)
+                    self.translate_uav_sensor(
+                        sensor, scene_description, scene_dir, asset_transforms
+                    )
                 )
             elif isinstance(sensor, GroundSensor):
                 measures.append(
-                    self.translate_ground_sensor(sensor, scene_description, scene_dir)
+                    self.translate_ground_sensor(
+                        sensor, scene_description, scene_dir, asset_transforms
+                    )
                 )
             else:
                 raise ValueError(f"Unsupported sensor type: {type(sensor)}")
@@ -210,6 +337,7 @@ class SensorTranslator:
         sensor: UAVSensor,
         scene_description: SceneDescription,
         scene_dir: UPath,
+        asset_transforms: Dict[str, _AssetTransform],
     ) -> Dict[str, Any]:
         """Translate UAV sensor to Eradiate measure.
 
@@ -217,11 +345,30 @@ class SensorTranslator:
             sensor: UAV sensor configuration
             scene_description: Scene description
             scene_dir: Scene directory path
+            asset_transforms: Asset transforms for relative positioning (backend-internal)
 
         Returns:
             Eradiate measure dictionary
         """
         view = sensor.viewing
+
+        # Handle asset-relative positioning
+        if hasattr(view, "relative_to_asset") and view.relative_to_asset is not None:
+            asset_name = self._resolve_asset_reference(
+                view.relative_to_asset, asset_transforms
+            )
+            asset_transform = asset_transforms[asset_name]
+
+            view.origin = apply_asset_relative_transform(view.origin, asset_transform)
+
+            if isinstance(view, LookAtViewing):
+                view.target = apply_asset_relative_transform(
+                    view.target, asset_transform
+                )
+
+            # Avoid double application of terrain adjustment
+            if view.terrain_relative_height:
+                view.terrain_relative_height = False
 
         origin, target = self.geometry_utils.adjust_origin_target_for_terrain(
             view, scene_description, scene_dir
@@ -266,6 +413,7 @@ class SensorTranslator:
         sensor: GroundSensor,
         scene_description: SceneDescription,
         scene_dir: UPath,
+        asset_transforms: Dict[str, _AssetTransform],
     ) -> Dict[str, Any]:
         """Translate ground sensor to Eradiate measure.
 
@@ -273,6 +421,7 @@ class SensorTranslator:
             sensor: Ground sensor configuration
             scene_description: Scene description
             scene_dir: Scene directory path
+            asset_transforms: Asset transforms for relative positioning (backend-internal)
 
         Returns:
             Eradiate measure dictionary
@@ -299,6 +448,29 @@ class SensorTranslator:
             "spp": sensor.samples_per_pixel,
             "srf": simulation_srf,
         }
+
+        if hasattr(view, "relative_to_asset") and view.relative_to_asset is not None:
+            asset_name = self._resolve_asset_reference(
+                view.relative_to_asset, asset_transforms
+            )
+            asset_transform = asset_transforms[asset_name]
+
+            if hasattr(view, "origin") and view.origin is not None:
+                view.origin = apply_asset_relative_transform(
+                    view.origin, asset_transform
+                )
+
+            if isinstance(view, LookAtViewing):
+                view.target = apply_asset_relative_transform(
+                    view.target, asset_transform
+                )
+
+            # Avoid double application of terrain adjustment
+            if (
+                hasattr(view, "terrain_relative_height")
+                and view.terrain_relative_height
+            ):
+                view.terrain_relative_height = False
 
         if isinstance(view, HemisphericalViewing):
             base_measure["type"] = "hdistant"
