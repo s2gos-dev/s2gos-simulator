@@ -1,6 +1,6 @@
 """Result processing and visualization for Eradiate backend."""
 
-from typing import Any, Dict
+from typing import Any, Dict, List, Union
 
 import numpy as np
 import xarray as xr
@@ -97,69 +97,83 @@ class ResultProcessor:
             "illumination_type": self.simulation_config.illumination.type,
         }
 
-    def create_rgb_visualization(self, experiment, output_dir: UPath, id_to_plot: str):
+    def create_rgb_visualization(
+        self, experiment, output_dir: UPath, id_to_plot: Union[str, List[str]]
+    ):
         """Create RGB visualization from camera results.
 
         Args:
             experiment: Eradiate experiment with results
             output_dir: Output directory for images
-            id_to_plot: Sensor ID to visualize
+            id_to_plot: Sensor ID(s) to visualize. Can be a single string or list of strings.
         """
-        try:
-            if id_to_plot not in experiment.results:
-                print(f"Warning: Sensor '{id_to_plot}' not found in results")
-                return
+        if isinstance(id_to_plot, str):
+            sensor_ids = [id_to_plot]
+        else:
+            sensor_ids = id_to_plot
 
-            sensor_data = experiment.results[id_to_plot]
+        if len(sensor_ids) > 1:
+            print(f"Creating RGB visualizations for {len(sensor_ids)} sensor(s)...")
 
-            if "radiance" in sensor_data:
-                radiance_data = sensor_data["radiance"]
-                if "x_index" in radiance_data.dims and "y_index" in radiance_data.dims:
-                    wavelengths = radiance_data.coords["w"].values
+        for sensor_id in sensor_ids:
+            try:
+                if sensor_id not in experiment.results:
+                    print(f"Warning: Sensor '{sensor_id}' not found in results")
+                    continue
 
-                    if len(wavelengths) >= 3:
-                        target_wavelengths = RGB_WAVELENGTHS_NM
-                        actual_wavelengths = [
-                            radiance_data.sel(w=w_val, method="nearest").w.item()
-                            for w_val in target_wavelengths
-                        ]
-                        corrected_channels = [
-                            ("w", w_val) for w_val in actual_wavelengths
-                        ]
+                sensor_data = experiment.results[sensor_id]
 
-                        img = (
-                            dataarray_to_rgb(
-                                radiance_data,
-                                channels=corrected_channels,
-                                normalize=False,
+                if "radiance" in sensor_data:
+                    radiance_data = sensor_data["radiance"]
+                    if (
+                        "x_index" in radiance_data.dims
+                        and "y_index" in radiance_data.dims
+                    ):
+                        wavelengths = radiance_data.coords["w"].values
+
+                        if len(wavelengths) >= 3:
+                            target_wavelengths = RGB_WAVELENGTHS_NM
+                            actual_wavelengths = [
+                                radiance_data.sel(w=w_val, method="nearest").w.item()
+                                for w_val in target_wavelengths
+                            ]
+                            corrected_channels = [
+                                ("w", w_val) for w_val in actual_wavelengths
+                            ]
+
+                            img = (
+                                dataarray_to_rgb(
+                                    radiance_data,
+                                    channels=corrected_channels,
+                                    normalize=False,
+                                )
+                                * 1.8
                             )
-                            * 1.8
-                        )
-                        img = np.clip(img, 0, 1)
-                        rgb_output = output_dir / f"{id_to_plot}_rgb.png"
-                        plt_img = (img * 255).astype(np.uint8)
-                        print(f"RGB image saved to: {rgb_output}")
+                            img = np.clip(img, 0, 1)
+                            rgb_output = output_dir / f"{sensor_id}_rgb.png"
+                            plt_img = (img * 255).astype(np.uint8)
+                            print(f"RGB image saved to: {rgb_output}")
+                        else:
+                            img_data = radiance_data.squeeze().values
+                            img_normalized = (img_data - img_data.min()) / (
+                                img_data.max() - img_data.min()
+                            )
+                            img_normalized = np.clip(img_normalized, 0, 1)
+                            plt_img = (img_normalized * 255).astype(np.uint8)
+                            rgb_output = output_dir / f"{sensor_id}_grayscale.png"
+                            print(f"Grayscale image saved to: {rgb_output}")
+
+                        rgb_image = Image.fromarray(plt_img)
+                        with open_file(rgb_output, "wb") as f:
+                            rgb_image.save(f, format="PNG")
+
                     else:
-                        img_data = radiance_data.squeeze().values
-                        img_normalized = (img_data - img_data.min()) / (
-                            img_data.max() - img_data.min()
-                        )
-                        img_normalized = np.clip(img_normalized, 0, 1)
-                        plt_img = (img_normalized * 255).astype(np.uint8)
-                        rgb_output = output_dir / f"{id_to_plot}_grayscale.png"
-                        print(f"Grayscale image saved to: {rgb_output}")
+                        spectral_output = output_dir / f"{sensor_id}_spectrum.png"
+                        self.plot_spectral_data(radiance_data, spectral_output)
+                        print(f"Spectral data plot saved to: {spectral_output}")
 
-                    rgb_image = Image.fromarray(plt_img)
-                    with open_file(rgb_output, "wb") as f:
-                        rgb_image.save(f, format="PNG")
-
-                else:
-                    spectral_output = output_dir / f"{id_to_plot}_spectrum.png"
-                    self.plot_spectral_data(radiance_data, spectral_output)
-                    print(f"Spectral data plot saved to: {spectral_output}")
-
-        except Exception as e:
-            print(f"Warning: Could not create visualization for {id_to_plot}: {e}")
+            except Exception as e:
+                print(f"Warning: Could not create visualization for {sensor_id}: {e}")
 
     def plot_spectral_data(self, radiance_data, output_path: UPath):
         """Plot spectral data for point sensors.
