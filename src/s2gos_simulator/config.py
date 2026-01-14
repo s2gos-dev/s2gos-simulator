@@ -1130,6 +1130,35 @@ class HypstarPostProcessingConfig(SRFPostProcessingConfig):
         description="Variable name for wavelengths in reference file",
     )
 
+    apply_circular_mask: bool = Field(
+        default=True,
+        description=(
+            "Apply circular FOV mask before spatial averaging. "
+            "Pixels outside the circular FOV are set to NaN and excluded. "
+            "Disable only for backwards compatibility testing."
+        ),
+    )
+
+    generate_rgb_image: bool = Field(
+        default=False,
+        description=(
+            "Generate RGB visualization before spatial averaging. "
+            "Requires at least 3 wavelengths covering RGB range (440-660nm). "
+            "Image saved as {sensor_id}_rgb.png in output directory."
+        ),
+    )
+
+    rgb_wavelengths: Tuple[float, float, float] = Field(
+        default=(660.0, 550.0, 440.0),
+        description="Target wavelengths (nm) for RGB channels (red, green, blue)",
+    )
+
+    rgb_brightness_factor: float = Field(
+        default=1.8,
+        gt=0.0,
+        description="Brightness multiplier for RGB visualization",
+    )
+
 
 class GroundInstrumentType(str, Enum):
     """Enum for ground instrument types for robustness."""

@@ -287,6 +287,10 @@ class EradiateBackend(SimulationBackend):
 
         logger.debug(f"Experiment results: {list(experiment.results.keys())}")
         raw_sensors = experiment.results
+
+        for sensor_id, raw_dataset in raw_sensors.items():
+            raw_dataset.attrs["output_dir"] = str(output_dir)
+
         post_processed = self.sensor_translator.apply_post_processing_to_sensors(
             raw_sensors
         )

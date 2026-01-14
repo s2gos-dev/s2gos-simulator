@@ -91,8 +91,11 @@ class SensorProcessor:
     def _apply_hypstar_post_processing(self, dataset: xr.Dataset, sensor) -> xr.Dataset:
         """Apply HYPSTAR-specific post-processing.
 
-        Applies Gaussian SRF convolution and spatial averaging to simulate
-        realistic HYPSTAR instrument response.
+        Pipeline order:
+        1. Circular FOV masking (default: enabled, sets pixels outside FOV to NaN)
+        2. RGB image generation (optional, requires spatial dims)
+        3. Spatial averaging (nanmean over x_index, y_index)
+        4. Gaussian SRF convolution (wavelength processing)
 
         Args:
             dataset: Raw simulation result with radiance data
@@ -101,22 +104,36 @@ class SensorProcessor:
         Returns:
             Post-processed dataset
         """
+        import logging
+
+        from upath import UPath
+
+        logger = logging.getLogger(__name__)
+
         config = sensor.hypstar_post_processing
         if config is None:
             return dataset
 
         result = dataset.copy()
-
         radiance = result["radiance"]
+
+        if getattr(config, "apply_circular_mask", True):
+            fov = getattr(sensor, "fov", None)
+            if fov is not None:
+                radiance = self._apply_circular_fov_mask(radiance, fov)
+            else:
+                logger.warning(
+                    "Circular mask enabled but sensor has no FOV parameter. Skipping."
+                )
+
+        if getattr(config, "generate_rgb_image", False):
+            output_dir = UPath(result.attrs.get("output_dir", "./output"))
+            self._generate_rgb_image(radiance, sensor.id, output_dir, config)
 
         if getattr(config, "spatial_averaging", True):
             radiance = self._apply_spatial_averaging(radiance)
 
         if getattr(config, "apply_srf", True):
-            import logging
-
-            logger = logging.getLogger(__name__)
-
             fwhm_vnir = getattr(config, "fwhm_vnir_nm", 3.0)
             fwhm_swir = getattr(config, "fwhm_swir_nm", 10.0)
 
@@ -126,17 +143,14 @@ class SensorProcessor:
                     logger.info(
                         f"Loading HYPSTAR reference: {config.real_reference_file}"
                     )
-
                     real_reference_ds = xr.open_dataset(config.real_reference_file)
                     target_wavelengths = real_reference_ds[config.wavelength_variable]
                     logger.info(
                         f"Loaded {len(target_wavelengths)} wavelengths "
-                        f"({float(target_wavelengths.min()):.1f} - "
-                        f"{float(target_wavelengths.max()):.1f} nm)"
+                        f"({float(target_wavelengths.min()):.1f}-{float(target_wavelengths.max()):.1f} nm)"
                     )
                 except Exception as e:
                     logger.error(f"Failed to load HYPSTAR reference: {e}")
-                    logger.warning("Falling back to simulation wavelengths")
                     target_wavelengths = None
 
             radiance = self._apply_gaussian_srf(
@@ -155,16 +169,189 @@ class SensorProcessor:
     def _apply_spatial_averaging(self, radiance: xr.DataArray) -> xr.DataArray:
         """Average over spatial dimensions (FOV pixels).
 
+        Uses nanmean to properly handle NaN values from circular masking.
+        Pixels outside the circular FOV are excluded from averaging.
+
         Args:
             radiance: Radiance DataArray with spatial dimensions
 
         Returns:
             Radiance averaged over spatial dimensions
         """
+        import numpy as np
+
         spatial_dims = [d for d in ["x_index", "y_index"] if d in radiance.dims]
         if spatial_dims:
-            return radiance.mean(dim=spatial_dims)
+            return radiance.reduce(np.nanmean, dim=spatial_dims)
         return radiance
+
+    def _apply_circular_fov_mask(
+        self,
+        radiance: xr.DataArray,
+        fov_degrees: float,
+    ) -> xr.DataArray:
+        """Apply circular FOV mask to camera data.
+
+        Sets pixels outside the circular field of view to NaN.
+        Uses simple geometric approach: circle radius = min(width, height) / 2.
+
+        Args:
+            radiance: Radiance DataArray with spatial dimensions (x_index, y_index)
+            fov_degrees: Field of view in degrees (for metadata only)
+
+        Returns:
+            Radiance with circular mask applied (values outside circle are NaN)
+        """
+        import logging
+
+        import numpy as np
+
+        logger = logging.getLogger(__name__)
+
+        if "x_index" not in radiance.dims or "y_index" not in radiance.dims:
+            logger.warning(
+                "Circular mask requires x_index and y_index dimensions. Skipping."
+            )
+            return radiance
+
+        ny, nx = len(radiance.y_index), len(radiance.x_index)
+
+        center_x = (nx - 1) / 2.0
+        center_y = (ny - 1) / 2.0
+        radius_pixels = min(nx, ny) / 2.0
+
+        y_coords, x_coords = np.meshgrid(np.arange(ny), np.arange(nx), indexing="ij")
+        distances = np.sqrt((x_coords - center_x) ** 2 + (y_coords - center_y) ** 2)
+        circular_mask_array = distances <= radius_pixels
+
+        circular_mask = xr.DataArray(
+            circular_mask_array,
+            dims=["y_index", "x_index"],
+            coords={
+                "y_index": radiance.coords["y_index"],
+                "x_index": radiance.coords["x_index"],
+            },
+        )
+
+        masked_radiance = radiance.where(circular_mask, other=np.nan)
+
+        masked_radiance.attrs["circular_mask_applied"] = True
+        masked_radiance.attrs["fov_degrees"] = fov_degrees
+        masked_radiance.attrs["mask_radius_pixels"] = float(radius_pixels)
+
+        logger.info(
+            f"Applied circular FOV mask: radius={radius_pixels:.1f} pixels, "
+            f"FOV={fov_degrees}°"
+        )
+
+        return masked_radiance
+
+    def _generate_rgb_image(
+        self,
+        radiance: xr.DataArray,
+        sensor_id: str,
+        output_dir,
+        config,
+    ) -> None:
+        """Generate RGB visualization from spatial radiance data.
+
+        Creates RGB image by selecting wavelengths closest to red, green, blue
+        target wavelengths and saving as PNG.
+
+        Args:
+            radiance: Radiance DataArray with spatial and spectral dimensions
+            sensor_id: Sensor identifier for output filename
+            output_dir: Directory to save RGB image
+            config: Post-processing configuration with RGB settings
+        """
+        import logging
+
+        import numpy as np
+        from PIL import Image
+        from s2gos_utils.io.paths import mkdir, open_file
+
+        logger = logging.getLogger(__name__)
+
+        if "x_index" not in radiance.dims or "y_index" not in radiance.dims:
+            logger.warning("RGB generation requires spatial dimensions. Skipping.")
+            return
+
+        if "w" not in radiance.dims:
+            logger.warning("RGB generation requires wavelength dimension. Skipping.")
+            return
+
+        wavelengths = radiance.coords["w"].values
+        if len(wavelengths) < 3:
+            logger.warning(
+                f"RGB generation requires at least 3 wavelengths "
+                f"(found {len(wavelengths)}). Skipping."
+            )
+            return
+
+        try:
+            from eradiate.xarray.interp import dataarray_to_rgb
+        except ImportError:
+            logger.warning(
+                "eradiate.xarray.interp.dataarray_to_rgb not available. Skipping RGB."
+            )
+            return
+
+        target_r, target_g, target_b = config.rgb_wavelengths
+        actual_wavelengths = [
+            radiance.sel(w=target_r, method="nearest").w.item(),
+            radiance.sel(w=target_g, method="nearest").w.item(),
+            radiance.sel(w=target_b, method="nearest").w.item(),
+        ]
+
+        logger.info(
+            f"RGB generation for {sensor_id}: "
+            f"R={actual_wavelengths[0]:.1f}nm, "
+            f"G={actual_wavelengths[1]:.1f}nm, "
+            f"B={actual_wavelengths[2]:.1f}nm"
+        )
+
+        channels = [("w", w) for w in actual_wavelengths]
+        img = dataarray_to_rgb(radiance, channels=channels, normalize=False)
+
+        img = img * config.rgb_brightness_factor
+        img = np.clip(img, 0, 1)
+
+        selected_wavelength = radiance.sel(w=actual_wavelengths[0], method="nearest")
+        squeezed = selected_wavelength.squeeze()
+        nan_mask = np.isnan(squeezed.values)
+
+        if nan_mask.ndim != 2:
+            logger.warning(
+                f"Expected 2D nan_mask for RGB, got {nan_mask.ndim}D with shape {nan_mask.shape}. "
+                f"Dimensions: {squeezed.dims}"
+            )
+            nan_mask = None
+
+        img = (img * 255).astype(np.uint8)
+
+        if nan_mask is not None and nan_mask.any():
+            if img.shape[:2] == nan_mask.shape:
+                img[nan_mask, 0] = 255
+                img[nan_mask, 1] = 255
+                img[nan_mask, 2] = 255
+                logger.info(
+                    f"Set {nan_mask.sum()} pixels outside circular FOV to white background"
+                )
+            else:
+                logger.warning(
+                    f"Cannot apply white background: img shape {img.shape[:2]} "
+                    f"doesn't match nan_mask shape {nan_mask.shape}"
+                )
+
+        rgb_path = output_dir / f"{sensor_id}_rgb.png"
+
+        mkdir(output_dir)
+        rgb_image = Image.fromarray(img)
+
+        with open_file(rgb_path, "wb") as f:
+            rgb_image.save(f, format="PNG")
+
+        logger.info(f"RGB image saved: {rgb_path}")
 
     def _apply_gaussian_srf(
         self,
