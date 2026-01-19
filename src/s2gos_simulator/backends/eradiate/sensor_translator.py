@@ -619,13 +619,16 @@ class SensorTranslator:
         """Translate generic SRF to Eradiate format.
 
         Args:
-            srf: SRF configuration object
+            srf: SRF configuration object or string identifier
 
         Returns:
             Eradiate SRF dictionary or identifier string
         """
         if srf is None:
             return None
+
+        if isinstance(srf, str):
+            return srf
 
         if srf.type == "delta":
             return {

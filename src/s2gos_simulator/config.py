@@ -319,7 +319,7 @@ class AngularFromOriginViewing(BaseViewing):
         0.0,
         ge=0.0,
         le=180.0,
-        description="Pointing zenith angle (0=down/nadir, 90=horizon, 180=up)",
+        description="Pointing zenith angle (0=up, 90=horizon, 180=nadir)",
     )
     azimuth: float = Field(
         0.0, ge=0.0, lt=360.0, description="Pointing azimuth angle (0=East, 90=North)"
@@ -565,6 +565,55 @@ class HDRFConfig(BaseModel):
                 )
 
         return self
+
+
+class PixelHDRFConfig(BaseModel):
+    """Configuration for BOA HDRF measurement at satellite pixel centers.
+
+    Calculates HDRF at specific pixel locations from a satellite sensor's target area:
+    - Uses the satellite sensor's geometry (target bounds, resolution) to map pixels to scene coordinates
+    - For each pixel: measures BOA irradiance (white disk) and surface radiance
+    - Computes HDRF = π × L_surface / E_boa
+
+    This measurement requires 2N simulations for N pixels (one irradiance + one radiance per pixel).
+    """
+
+    type: Literal["pixel_hdrf"] = "pixel_hdrf"
+    id: str = Field(description="Unique identifier for this pixel HDRF measurement")
+    satellite_sensor_id: str = Field(
+        description="ID of SatelliteSensor to use for geometry (target bounds, resolution)"
+    )
+    pixel_indices: List[Tuple[int, int]] = Field(
+        description="List of (row, col) pixel indices to measure. Row 0 is top (north), col 0 is left (west)."
+    )
+    height_offset_m: float = Field(
+        default=0.5,
+        ge=0.0,
+        description="Height above terrain surface for measurements (meters)",
+    )
+    samples_per_pixel: int = Field(
+        default=512,
+        ge=1,
+        description="Monte Carlo samples per pixel for both irradiance and radiance measurements",
+    )
+    srf: Optional[SRFType] = Field(
+        default=None,
+        description="Spectral response function. If None, inherits from satellite sensor.",
+    )
+
+    @field_validator("pixel_indices")
+    @classmethod
+    def validate_pixel_indices(cls, v):
+        """Validate pixel indices are non-negative tuples."""
+        if not v:
+            raise ValueError("pixel_indices cannot be empty")
+        for i, (row, col) in enumerate(v):
+            if row < 0 or col < 0:
+                raise ValueError(
+                    f"Pixel index {i} has negative value: ({row}, {col}). "
+                    "Row and column must be >= 0."
+                )
+        return v
 
 
 class HCRFPostProcessingConfig(BaseModel):
@@ -845,6 +894,7 @@ MeasurementConfig = Annotated[
         BRFConfig,
         HDRFConfig,
         HCRFConfig,
+        PixelHDRFConfig,
         RadianceConfig,
         BHRConfig,
     ],
@@ -1508,6 +1558,23 @@ class SimulationConfig(BaseModel):
                         errors.append(
                             f"BRF '{measurement.id}' references unknown sensor "
                             f"'{measurement.reference_radiance_sensor_id}'"
+                        )
+
+            # Check PixelHDRF sensor references
+            if isinstance(measurement, PixelHDRFConfig):
+                if measurement.satellite_sensor_id not in sensor_ids:
+                    errors.append(
+                        f"PixelHDRF '{measurement.id}' references unknown sensor "
+                        f"'{measurement.satellite_sensor_id}'"
+                    )
+                else:
+                    # Validate that referenced sensor is a SatelliteSensor
+                    sensor = self.get_sensor(measurement.satellite_sensor_id)
+                    if sensor and not isinstance(sensor, SatelliteSensor):
+                        errors.append(
+                            f"PixelHDRF '{measurement.id}' references sensor "
+                            f"'{measurement.satellite_sensor_id}' which is not a SatelliteSensor "
+                            f"(type: {type(sensor).__name__})"
                         )
 
         if errors:

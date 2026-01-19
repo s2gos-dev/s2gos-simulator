@@ -1,4 +1,4 @@
-"""Refactored Eradiate backend for S2GOS simulator.
+"""Eradiate backend for S2GOS simulator.
 
 This is the main orchestration layer that coordinates the specialized modules
 for geometry, atmosphere, surfaces, sensors, and result processing.
@@ -19,9 +19,12 @@ from .sensor_translator import SensorTranslator
 from .surface_builder import SurfaceBuilder
 from ..base import SimulationBackend
 from ...config import (
+    AngularFromOriginViewing,
     GroundInstrumentType,
     HCRFConfig,
     HDRFConfig,
+    HemisphericalMeasurementLocation,
+    PixelHDRFConfig,
     PlatformType,
     SimulationConfig,
 )
@@ -102,7 +105,9 @@ class EradiateBackend(SimulationBackend):
         """
         return [
             "hdrf",
-            "hcrfboa_irradiance",
+            "hcrf",
+            "boa_irradiance",
+            "pixel_hdrf",
         ]
 
     def validate_configuration(self) -> List[str]:
@@ -227,6 +232,9 @@ class EradiateBackend(SimulationBackend):
         from s2gos_utils.io.paths import mkdir
 
         mkdir(output_dir)
+
+        self._expand_pixel_hdrf_configs()
+        self._auto_generate_sensors_for_measurements()
 
         print(f"Eradiate simulation: {self.simulation_config.name}")
         print(f"  Sensors: {len(self.simulation_config.sensors)}")
@@ -376,13 +384,6 @@ class EradiateBackend(SimulationBackend):
         self._current_scene_dir = scene_dir
         self._current_scene_description = scene_description
 
-        # Auto-generate sensors for HDRF/HCRF if needed
-        generated_sensor_ids = self._auto_generate_sensors_for_measurements()
-        if generated_sensor_ids:
-            print(f"  Auto-generated {len(generated_sensor_ids)} sensors:")
-            for sensor_id in generated_sensor_ids:
-                print(f"    - {sensor_id}")
-
         self._validate_object_materials(scene_description)
         kdict, kpmap = self.surface_builder.translate_materials(
             scene_description, scene_dir
@@ -476,6 +477,77 @@ class EradiateBackend(SimulationBackend):
                     f"Object {i} references unknown material '{material}'. "
                     f"Available materials: {available}"
                 )
+
+    def _expand_pixel_hdrf_configs(self) -> None:
+        """Expand PixelHDRFConfig into individual HDRFConfig measurements.
+
+        For each pixel in a PixelHDRFConfig, creates an HDRFConfig at the
+        corresponding scene coordinates.
+        """
+        from s2gos_utils.coordinates import CoordinateSystem, pixel_to_scene_xy
+
+        pixel_hdrf_configs = [
+            m
+            for m in self.simulation_config.measurements
+            if isinstance(m, PixelHDRFConfig)
+        ]
+
+        if not pixel_hdrf_configs:
+            return
+
+        for pixel_config in pixel_hdrf_configs:
+            sensor = self.simulation_config.get_sensor(pixel_config.satellite_sensor_id)
+            if sensor is None:
+                raise ValueError(
+                    f"PixelHDRF '{pixel_config.id}' references unknown sensor "
+                    f"'{pixel_config.satellite_sensor_id}'"
+                )
+
+            coord_sys = CoordinateSystem(
+                sensor.target_center_lat, sensor.target_center_lon
+            )
+            if isinstance(sensor.target_size_km, (int, float)):
+                width_km = height_km = float(sensor.target_size_km)
+            else:
+                width_km, height_km = sensor.target_size_km
+
+            bounds = coord_sys.create_rectangle(
+                sensor.target_center_lat, sensor.target_center_lon, width_km, height_km
+            )
+
+            srf = pixel_config.srf if pixel_config.srf is not None else sensor.srf
+
+            for row, col in pixel_config.pixel_indices:
+                x, y = pixel_to_scene_xy(row, col, bounds, sensor.film_resolution)
+                hdrf_config = HDRFConfig(
+                    id=f"{pixel_config.id}_r{row}_c{col}",
+                    instrument="hemispherical",
+                    location=HemisphericalMeasurementLocation(
+                        target_x=x,
+                        target_y=y,
+                        target_z=0,
+                        height_offset_m=pixel_config.height_offset_m,
+                        terrain_relative_height=True,
+                    ),
+                    viewing=AngularFromOriginViewing(
+                        origin=[x, y, pixel_config.height_offset_m],
+                        zenith=180,
+                        up=[0, 1, 0],
+                        terrain_relative_height=True,
+                    ),
+                    reference_height_offset_m=pixel_config.height_offset_m,
+                    srf=srf,
+                    samples_per_pixel=pixel_config.samples_per_pixel,
+                    terrain_relative_height=True,
+                )
+
+                self.simulation_config.measurements.append(hdrf_config)
+                logging.info(
+                    f"Expanded pixel ({row}, {col}) -> HDRFConfig '{hdrf_config.id}' "
+                    f"at scene ({x:.1f}, {y:.1f})"
+                )
+
+            self.simulation_config.measurements.remove(pixel_config)
 
     def _auto_generate_sensors_for_measurements(self) -> List[str]:
         """Auto-generate sensors for measurements that require them.
