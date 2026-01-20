@@ -5,7 +5,7 @@ measure definitions, including post-processing and derived measurement computati
 """
 
 import logging
-from typing import Any, Dict, List, NamedTuple, Tuple, Union
+from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple, Union
 
 import numpy as np
 import xarray as xr
@@ -16,6 +16,7 @@ from upath import UPath
 from .geometry_utils import apply_asset_relative_transform, sanitize_sensor_id
 from ...config import (
     AngularFromOriginViewing,
+    BRFConfig,
     ConstantIllumination,
     DirectionalIllumination,
     GroundInstrumentType,
@@ -210,6 +211,7 @@ class SensorTranslator:
         scene_description: SceneDescription,
         scene_dir: UPath,
         include_irradiance_measures: bool = True,
+        sensor_ids: Optional[Set[str]] = None,
     ) -> List[Dict[str, Any]]:
         """Translate generic sensors and measurements to Eradiate measures.
 
@@ -217,6 +219,9 @@ class SensorTranslator:
             scene_description: Scene description with metadata
             scene_dir: Scene directory path
             include_irradiance_measures: Whether to include irradiance measurements
+            sensor_ids: Optional set of sensor IDs to include. If None, all sensors
+                are included. Use this to filter sensors for specific workflows
+                (e.g., only BRF sensors for BRF workflow).
 
         Returns:
             List of Eradiate measure dictionaries
@@ -229,6 +234,8 @@ class SensorTranslator:
         measures = []
 
         for sensor in self.simulation_config.sensors:
+            if sensor_ids is not None and sensor.id not in sensor_ids:
+                continue
             if isinstance(sensor, SatelliteSensor):
                 measures.append(
                     self.translate_satellite_sensor(sensor, scene_description)
@@ -272,7 +279,7 @@ class SensorTranslator:
                     measures.append(
                         self.create_irradiance_measure(measurement, disk_coords)
                     )
-                elif isinstance(measurement, (HDRFConfig, HCRFConfig)):
+                elif isinstance(measurement, (HDRFConfig, HCRFConfig, BRFConfig)):
                     continue  # Handled in derived measurements
                 else:
                     raise ValueError(
@@ -750,6 +757,25 @@ class SensorTranslator:
             location=location_with_srf,
         )
 
+    def generate_radiance_sensor_for_brf(self, brf_config: BRFConfig) -> GroundSensor:
+        """Generate radiance sensor for BRF measurement (no atmosphere).
+
+        Args:
+            brf_config: BRF configuration
+
+        Returns:
+            Generated GroundSensor for radiance measurement
+        """
+        sensor_id = f"brf_radiance_{brf_config.id}"
+
+        return GroundSensor(
+            id=sensor_id,
+            instrument=GroundInstrumentType.RADIANCEMETER,
+            viewing=brf_config.viewing,
+            srf=brf_config.srf,
+            samples_per_pixel=brf_config.samples_per_pixel or 512,
+        )
+
     def get_sensor_by_id(self, sensor_id: str):
         """Find sensor config by ID.
 
@@ -928,3 +954,83 @@ class SensorTranslator:
         )
 
         return hcrf_ds
+
+    def compute_brf(
+        self,
+        radiance_dataset: xr.Dataset,
+        brf_config: BRFConfig,
+    ) -> xr.Dataset:
+        """Compute BRF from radiance dataset (no atmosphere).
+
+        BRF = (π × L) / (E_toa × cos(SZA))
+
+        Args:
+            radiance_dataset: Radiance dataset with 'irradiance'
+            brf_config: BRF configuration
+
+        Returns:
+            BRF dataset
+        """
+        L = radiance_dataset["radiance"]
+        E_toa = radiance_dataset["irradiance"]
+
+        illumination = self.simulation_config.illumination
+        if not isinstance(illumination, DirectionalIllumination):
+            raise ValueError(
+                f"BRF requires DirectionalIllumination, got {type(illumination)}"
+            )
+
+        sza_rad = np.deg2rad(illumination.zenith)
+        cos_sza = np.cos(sza_rad)
+
+        if "w" in L.dims and "w" in E_toa.dims:
+            if not np.array_equal(L.w.values, E_toa.w.values):
+                E_toa = E_toa.interp(w=L.w, method="linear")
+
+        if set(L.dims) - set(E_toa.dims):
+            E_toa = E_toa.broadcast_like(L)
+
+        brf = (np.pi * L) / (E_toa * cos_sza)
+
+        return xr.Dataset(
+            {"brf": brf},
+            attrs={
+                "measurement_type": "brf",
+                "measurement_id": brf_config.id,
+                "units": "dimensionless",
+                "formula": "BRF = (π × L) / (E_toa × cos(SZA))",
+                "solar_zenith_deg": illumination.zenith,
+                "cos_sza": float(cos_sza),
+                "atmosphere": "none",
+            },
+        )
+
+    def compute_brf_measurements(
+        self,
+        sensor_results: Dict[str, xr.Dataset],
+        brf_configs: List[BRFConfig],
+    ) -> Dict[str, xr.Dataset]:
+        """Compute BRF for all BRF configs.
+
+        Args:
+            sensor_results: Dictionary of sensor results
+            brf_configs: List of BRFConfig measurements
+
+        Returns:
+            Dictionary of BRF measurement datasets
+        """
+        derived = {}
+        for config in brf_configs:
+            radiance_ds = sensor_results.get(config.radiance_sensor_id)
+            if radiance_ds is not None:
+                try:
+                    derived[config.id] = self.compute_brf(radiance_ds, config)
+                    logger.info(f"Computed BRF for '{config.id}'")
+                except Exception as e:
+                    logger.error(f"Failed to compute BRF for '{config.id}': {e}")
+            else:
+                logger.warning(
+                    f"Radiance dataset not found for BRF '{config.id}' "
+                    f"(sensor_id: {config.radiance_sensor_id})"
+                )
+        return derived

@@ -174,9 +174,7 @@ class HDRFProcessor:
 
         from .config import HDRFConfig
 
-        logger.info("=" * 60)
-        logger.info("HDRF Computation from Radiance + Irradiance")
-        logger.info("=" * 60)
+        logger.info("Computing HDRF from radiance + irradiance...")
 
         mkdir(output_dir)
         hdrf_datasets = {}
@@ -193,8 +191,7 @@ class HDRFProcessor:
             )
             ref_id = hdrf_config.irradiance_measurement_id
 
-            logger.info(f"\n[{hdrf_id}]")
-            logger.info(f"  Using reference: {ref_id}")
+            logger.debug(f"Processing HDRF '{hdrf_id}' with reference '{ref_id}'")
 
             # Get radiance from actual scene
             if hdrf_id not in radiance_results:
@@ -221,40 +218,26 @@ class HDRFProcessor:
 
             E_reference = irradiance_ds["boa_irradiance"]
 
-            # DIAGNOSTIC logging before HDRF calculation
-            logger.info(f"=== HDRF DIAGNOSTIC: {hdrf_id} ===")
-            logger.info(f"  L_actual dims: {L_actual.dims}, shape: {L_actual.shape}")
-            logger.info(
+            # Diagnostic logging at DEBUG level
+            logger.debug(
+                f"HDRF '{hdrf_id}': L dims={L_actual.dims}, E dims={E_reference.dims}"
+            )
+            logger.debug(
                 f"  L_actual: mean={float(L_actual.mean()):.6e}, "
                 f"range=[{float(L_actual.min()):.6e}, {float(L_actual.max()):.6e}]"
             )
-            logger.info(
-                f"  E_reference dims: {E_reference.dims}, shape: {E_reference.shape}"
-            )
-            logger.info(
+            logger.debug(
                 f"  E_reference: mean={float(E_reference.mean()):.6e}, "
                 f"range=[{float(E_reference.min()):.6e}, {float(E_reference.max()):.6e}]"
             )
 
-            if "w" in L_actual.dims and "w" in E_reference.dims:
-                logger.info(
-                    f"  L_actual wavelengths: {len(L_actual.w)} points, "
-                    f"range=[{float(L_actual.w.min()):.1f}, {float(L_actual.w.max()):.1f}] nm"
-                )
-                logger.info(
-                    f"  E_reference wavelengths: {len(E_reference.w)} points, "
-                    f"range=[{float(E_reference.w.min()):.1f}, {float(E_reference.w.max()):.1f}] nm"
-                )
-
             # Compute HDRF = (π × L_actual) / E_reference
-            logger.info("  Computing: HDRF = (π × L_actual) / E_reference")
             hdrf = (np.pi * L_actual) / E_reference
 
             logger.info(
-                f"  HDRF result: mean={float(hdrf.mean()):.4f}, "
+                f"  HDRF '{hdrf_id}': mean={float(hdrf.mean()):.4f}, "
                 f"range=[{float(hdrf.min()):.4f}, {float(hdrf.max()):.4f}]"
             )
-            logger.info("  Expected: HDRF typically 0.0-1.0 for natural surfaces")
 
             # Create dataset
             hdrf_dataset = xr.Dataset(
@@ -280,10 +263,8 @@ class HDRFProcessor:
             # Save
             output_file = output_dir / f"{hdrf_id}_hdrf.zarr"
             hdrf_dataset.to_zarr(output_file, mode="w")
-            logger.info(f"  ✓ Saved: {output_file.name}")
+            logger.debug(f"Saved HDRF to {output_file.name}")
 
-        logger.info(f"\n{'=' * 60}")
-        logger.info(f"Complete: {len(hdrf_datasets)} HDRF measurements")
-        logger.info(f"{'=' * 60}\n")
+        logger.info(f"HDRF computation complete: {len(hdrf_datasets)} measurements")
 
         return hdrf_datasets

@@ -436,55 +436,51 @@ class IrradianceConfig(BaseModel):
 
 
 class BRFConfig(BaseModel):
-    """Configuration for Bidirectional Reflectance Factor (BRF) measurement.
+    """Configuration for BRF measurement WITHOUT atmosphere.
 
-    BRF is the ratio of radiance reflected in a specific direction to that from
-    a perfect Lambertian reflector under the same illumination conditions.
+    BRF = (π × L) / (E_toa × cos(SZA))
+
+    Uses TOA irradiance directly from simulation results (no white disk needed).
+    Requires simulation to run with atmosphere=None.
 
     Two modes:
-    1. Reference mode: Specify radiance_sensor_id + reference_radiance_sensor_id
-    2. Auto-generation mode: Specify viewing angles, backend creates sensors
+    1. Reference mode: Specify radiance_sensor_id (sensor already exists)
+    2. Auto-generation mode: Specify location + viewing, backend creates sensors
     """
 
     type: Literal["brf"] = "brf"
-    id: Optional[str] = Field(None, description="Unique identifier")
+    id: str = Field(description="Unique identifier")
 
-    # Mode 1: Reference existing sensors
+    # Mode 1: Reference existing sensor
     radiance_sensor_id: Optional[str] = Field(
-        None, description="ID of sensor providing actual radiance measurement"
-    )
-    reference_radiance_sensor_id: Optional[str] = Field(
-        None, description="ID of sensor providing reference radiance (Lambertian disk)"
+        None, description="ID of sensor providing radiance measurement"
     )
 
     # Mode 2: Auto-generation mode
-    viewing_zenith: Optional[float] = Field(
-        None, ge=0.0, le=180.0, description="Viewing zenith angle (auto-generation)"
+    viewing: Optional[AngularFromOriginViewing] = Field(
+        None, description="Viewing geometry for radiancemeter (auto-generation)"
     )
-    viewing_azimuth: Optional[float] = Field(
-        None, ge=0.0, lt=360.0, description="Viewing azimuth angle (auto-generation)"
-    )
+
+    # Optional overrides
+    srf: Optional[SRFType] = Field(None, description="Spectral response function")
+    samples_per_pixel: int = Field(default=512, ge=1)
+    terrain_relative_height: bool = Field(default=True)
 
     @model_validator(mode="after")
     def validate_brf_mode(self):
-        """Validate that either sensor references OR viewing angles are provided."""
-        has_refs = (
-            self.radiance_sensor_id is not None
-            and self.reference_radiance_sensor_id is not None
-        )
-        has_autogen = (
-            self.viewing_zenith is not None and self.viewing_azimuth is not None
-        )
+        """Validate that either sensor reference OR auto-generation specs are provided."""
+        has_ref = self.radiance_sensor_id is not None
+        has_autogen = self.viewing is not None
 
-        if has_refs and has_autogen:
+        if has_ref and has_autogen:
             raise ValueError(
-                "Specify either sensor references OR viewing angles, not both"
+                "Specify either radiance_sensor_id OR auto-generation mode (location + viewing), not both"
             )
 
-        if not has_refs and not has_autogen:
+        if not has_ref and not has_autogen:
             raise ValueError(
-                "Must specify either references (radiance_sensor_id + reference_radiance_sensor_id) "
-                "OR auto-generation mode (viewing_zenith + viewing_azimuth)"
+                "Must specify either radiance_sensor_id "
+                "OR auto-generation mode (location + viewing)"
             )
 
         return self
@@ -567,19 +563,14 @@ class HDRFConfig(BaseModel):
         return self
 
 
-class PixelHDRFConfig(BaseModel):
-    """Configuration for BOA HDRF measurement at satellite pixel centers.
+class BasePixelMeasurementConfig(BaseModel):
+    """Base configuration for pixel-based measurements at satellite pixel centers.
 
-    Calculates HDRF at specific pixel locations from a satellite sensor's target area:
-    - Uses the satellite sensor's geometry (target bounds, resolution) to map pixels to scene coordinates
-    - For each pixel: measures BOA irradiance (white disk) and surface radiance
-    - Computes HDRF = π × L_surface / E_boa
-
-    This measurement requires 2N simulations for N pixels (one irradiance + one radiance per pixel).
+    Maps satellite pixels to scene coordinates for reflectance measurements.
+    Subclasses define the specific measurement type (BRF, HDRF).
     """
 
-    type: Literal["pixel_hdrf"] = "pixel_hdrf"
-    id: str = Field(description="Unique identifier for this pixel HDRF measurement")
+    id: str = Field(description="Unique identifier for this pixel measurement")
     satellite_sensor_id: str = Field(
         description="ID of SatelliteSensor to use for geometry (target bounds, resolution)"
     )
@@ -594,7 +585,7 @@ class PixelHDRFConfig(BaseModel):
     samples_per_pixel: int = Field(
         default=512,
         ge=1,
-        description="Monte Carlo samples per pixel for both irradiance and radiance measurements",
+        description="Monte Carlo samples per pixel",
     )
     srf: Optional[SRFType] = Field(
         default=None,
@@ -614,6 +605,31 @@ class PixelHDRFConfig(BaseModel):
                     "Row and column must be >= 0."
                 )
         return v
+
+
+class PixelHDRFConfig(BasePixelMeasurementConfig):
+    """BOA HDRF measurement at satellite pixel centers (WITH atmosphere).
+
+    HDRF = π × L_surface / E_boa
+
+    Uses satellite sensor geometry to map pixels to scene coordinates.
+    Requires 2N simulations for N pixels (irradiance + radiance per pixel).
+    """
+
+    type: Literal["pixel_hdrf"] = "pixel_hdrf"
+
+
+class PixelBRFConfig(BasePixelMeasurementConfig):
+    """BRF measurement at satellite pixel centers (NO atmosphere).
+
+    BRF = (π × L) / (E_toa × cos(SZA))
+
+    Uses satellite sensor geometry to map pixels to scene coordinates.
+    Simpler than PixelHDRF - uses TOA irradiance from results, no white disk needed.
+    Requires N simulations for N pixels (radiance only).
+    """
+
+    type: Literal["pixel_brf"] = "pixel_brf"
 
 
 class HCRFPostProcessingConfig(BaseModel):
@@ -895,6 +911,7 @@ MeasurementConfig = Annotated[
         HDRFConfig,
         HCRFConfig,
         PixelHDRFConfig,
+        PixelBRFConfig,
         RadianceConfig,
         BHRConfig,
     ],
@@ -1545,7 +1562,7 @@ class SimulationConfig(BaseModel):
                             f"as irradiance, but it is not an IrradianceConfig"
                         )
 
-            # Check BRF sensor references
+            # Check BRF sensor references (atmosphere-less BRF)
             if isinstance(measurement, BRFConfig):
                 if measurement.radiance_sensor_id:
                     if measurement.radiance_sensor_id not in sensor_ids:
@@ -1553,11 +1570,20 @@ class SimulationConfig(BaseModel):
                             f"BRF '{measurement.id}' references unknown sensor "
                             f"'{measurement.radiance_sensor_id}'"
                         )
-                if measurement.reference_radiance_sensor_id:
-                    if measurement.reference_radiance_sensor_id not in sensor_ids:
+
+            if isinstance(measurement, PixelBRFConfig):
+                if measurement.satellite_sensor_id not in sensor_ids:
+                    errors.append(
+                        f"PixelBRF '{measurement.id}' references unknown sensor "
+                        f"'{measurement.satellite_sensor_id}'"
+                    )
+                else:
+                    sensor = self.get_sensor(measurement.satellite_sensor_id)
+                    if sensor and not isinstance(sensor, SatelliteSensor):
                         errors.append(
-                            f"BRF '{measurement.id}' references unknown sensor "
-                            f"'{measurement.reference_radiance_sensor_id}'"
+                            f"PixelBRF '{measurement.id}' references sensor "
+                            f"'{measurement.satellite_sensor_id}' which is not a SatelliteSensor "
+                            f"(type: {type(sensor).__name__})"
                         )
 
             # Check PixelHDRF sensor references
