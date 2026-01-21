@@ -15,6 +15,7 @@ from upath import UPath
 from .geometry_utils import apply_asset_relative_transform, sanitize_sensor_id
 from ...config import (
     AngularFromOriginViewing,
+    BHRConfig,
     BRFConfig,
     ConstantIllumination,
     DirectionalIllumination,
@@ -278,7 +279,9 @@ class SensorTranslator:
                     measures.append(
                         self.create_irradiance_measure(measurement, disk_coords)
                     )
-                elif isinstance(measurement, (HDRFConfig, HCRFConfig, BRFConfig)):
+                elif isinstance(
+                    measurement, (HDRFConfig, HCRFConfig, BRFConfig, BHRConfig)
+                ):
                     continue  # Handled in derived measurements
                 else:
                     raise ValueError(
@@ -584,6 +587,56 @@ class SensorTranslator:
             "target": [x, y, z],  # Point at disk location
             "direction": [0, 0, 1],  # Upward-looking hemisphere
             "ray_offset": 0.1,  # Small offset to prevent self-intersection
+            "srf": srf,
+            "spp": spp,
+        }
+
+    def create_distant_flux_measure(
+        self,
+        bhr_config: BHRConfig,
+        target_coords: Tuple[float, float, float],
+        is_reference: bool = False,
+    ) -> Dict[str, Any]:
+        """Create distant_flux measure for BHR measurement.
+
+        The distant_flux measure computes radiosity (power per unit area)
+        by integrating over all directions in a hemisphere. This is used
+        for BHR computation which requires radiosity ratios.
+
+        Args:
+            bhr_config: BHR configuration
+            target_coords: Target coordinates (x, y, z) in scene coordinate system
+            is_reference: If True, this is for the white reference simulation
+
+        Returns:
+            Eradiate distant_flux measure dictionary
+        """
+        # Create unique measure ID based on whether this is surface or reference
+        if is_reference:
+            measure_id = f"bhr_reference_{bhr_config.id}"
+        else:
+            measure_id = f"bhr_surface_{bhr_config.id}"
+
+        x, y, z = target_coords
+
+        srf = self.translate_srf(bhr_config.srf)
+        spp = bhr_config.samples_per_pixel
+
+        logger.debug(
+            f"Creating distant_flux measure '{measure_id}' at target "
+            f"({x:.2f}, {y:.2f}, {z:.2f}) m, spp={spp}"
+        )
+
+        return {
+            "type": "distant_flux",
+            "id": sanitize_sensor_id(measure_id),
+            "target": [x, y, z],
+            "direction": [
+                0,
+                0,
+                1,
+            ],  # Upward-looking (measures downward flux onto surface)
+            "ray_offset": 1.0,
             "srf": srf,
             "spp": spp,
         }

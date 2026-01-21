@@ -8,7 +8,7 @@ import xarray as xr
 
 logger = logging.getLogger(__name__)
 
-ReflectanceType = Literal["hdrf", "hcrf", "brf"]
+ReflectanceType = Literal["hdrf", "hcrf", "brf", "bhr"]
 
 
 def align_and_broadcast_datasets(
@@ -75,6 +75,11 @@ def compute_reflectance_factor(
             raise ValueError("cos_sza is required for BRF computation")
         result = (np.pi * L) / (E * cos_sza)
         formula = "BRF = (pi * L) / (E_toa * cos(SZA))"
+    elif reflectance_type == "bhr":
+        # BHR is simple ratio of radiosity values (no pi factor)
+        # L = surface radiosity, E = reference radiosity (white Lambertian disk)
+        result = L / E
+        formula = "BHR = J_surface / J_reference"
     else:
         result = (np.pi * L) / E
         formula = f"{reflectance_type.upper()} = (pi * L) / E"

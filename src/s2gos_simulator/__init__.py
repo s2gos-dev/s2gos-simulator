@@ -4,6 +4,7 @@
 # Import backends with optional dependencies
 from .backends import ERADIATE_AVAILABLE, EradiateSimulator
 from .backends.eradiate.backend import EradiateBackend
+from .bhr_processor import BHRProcessor
 from .config import (
     AngularFromOriginViewing,
     AngularViewing,
@@ -20,6 +21,7 @@ from .config import (
     HemisphericalViewing,
     IrradianceConfig,
     LookAtViewing,
+    PixelBHRConfig,
     PlatformType,
     RadianceConfig,
     SatelliteSensor,
@@ -57,9 +59,11 @@ __all__ = [
     "BRFConfig",
     "RadianceConfig",
     "BHRConfig",
+    "PixelBHRConfig",
     # Backends and Processors
     "EradiateSimulator",
     "EradiateBackend",
     "ERADIATE_AVAILABLE",
+    "BHRProcessor",
     "HDRFProcessor",
 ]

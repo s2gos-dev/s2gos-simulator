@@ -18,14 +18,17 @@ from .result_processor import ResultProcessor
 from .sensor_translator import SensorTranslator
 from .surface_builder import SurfaceBuilder
 from ..base import SimulationBackend
+from ...bhr_processor import BHRProcessor
 from ...brf_processor import BRFProcessor
 from ...config import (
     AngularFromOriginViewing,
+    BHRConfig,
     BRFConfig,
     GroundInstrumentType,
     HCRFConfig,
     HDRFConfig,
     HemisphericalMeasurementLocation,
+    PixelBHRConfig,
     PixelBRFConfig,
     PixelHDRFConfig,
     PlatformType,
@@ -112,9 +115,11 @@ class EradiateBackend(SimulationBackend):
             "hdrf",
             "hcrf",
             "brf",
+            "bhr",
             "boa_irradiance",
             "pixel_hdrf",
             "pixel_brf",
+            "pixel_bhr",
         ]
 
     def validate_configuration(self) -> List[str]:
@@ -250,15 +255,17 @@ class EradiateBackend(SimulationBackend):
 
         # Initialize processors
         brf_proc = BRFProcessor(self)
+        bhr_proc = BHRProcessor(self)
         hdrf_proc = HDRFProcessor(self)
         irr_proc = IrradianceProcessor(self)
 
-        # Separate BRF measurements from others (BRF needs no atmosphere)
+        # Separate BRF and BHR measurements from others (they have special workflows)
         brf_configs = brf_proc.get_brf_configs()
+        bhr_configs = bhr_proc.get_bhr_configs()
         non_brf_measurements = [
             m
             for m in self.simulation_config.measurements
-            if not isinstance(m, BRFConfig)
+            if not isinstance(m, BRFConfig) and not isinstance(m, BHRConfig)
         ]
 
         # Extract BRF sensor IDs so we can exclude them from standard/HDRF workflow
@@ -285,6 +292,15 @@ class EradiateBackend(SimulationBackend):
                 **kwargs,
             )
             all_results.update(brf_results)
+
+        # Run BHR workflow if we have BHR measurements
+        if bhr_configs:
+            bhr_results = bhr_proc.execute_bhr_measurements(
+                scene_description,
+                scene_dir,
+                output_dir / "bhr_results",
+            )
+            all_results.update(bhr_results)
 
         if non_brf_measurements or self.simulation_config.sensors:
             if requires_hdrf or requires_irr:
@@ -591,6 +607,100 @@ class EradiateBackend(SimulationBackend):
             kpmap=kpmap,
         )
 
+    def _create_experiment_for_bhr(
+        self,
+        scene_description: SceneDescription,
+        scene_dir: UPath,
+        bhr_config: BHRConfig,
+        target_coords: tuple,
+        is_reference: bool = False,
+    ):
+        """Create Eradiate experiment for BHR measurement using distant_flux.
+
+        Similar to _create_experiment() but uses distant_flux measure specifically
+        for BHR workflow.
+
+        Args:
+            scene_description: Scene description (may include white reference disk)
+            scene_dir: Base directory for resolving file paths
+            bhr_config: BHR configuration
+            target_coords: Target coordinates (x, y, z) for the measurement
+            is_reference: If True, this is the white reference simulation
+
+        Returns:
+            AtmosphereExperiment configured for BHR measurement
+        """
+        self._current_scene_dir = scene_dir
+        self._current_scene_description = scene_description
+
+        self._validate_object_materials(scene_description)
+        kdict, kpmap = self.surface_builder.translate_materials(
+            scene_description, scene_dir
+        )
+
+        hamster_data_dict = self._get_hamster_data_for_scene(
+            scene_description, scene_dir
+        )
+        self.surface_builder.add_hamster_materials(
+            kdict, kpmap, scene_description, hamster_data_dict
+        )
+
+        hamster_available = hamster_data_dict is not None
+        kdict.update(
+            self.surface_builder.create_target_surface(
+                scene_description, scene_dir, hamster_available
+            )
+        )
+
+        if scene_description.buffer:
+            kdict.update(
+                self.surface_builder.create_buffer_surface(
+                    scene_description, scene_dir, hamster_available
+                )
+            )
+
+        if scene_description.background:
+            kdict.update(
+                self.surface_builder.create_background_surface(
+                    scene_description, scene_dir, hamster_available
+                )
+            )
+
+        self.surface_builder.add_scene_objects(kdict, scene_description, scene_dir)
+
+        # BHR uses atmosphere (unlike BRF)
+        atmosphere_obj = self.atmosphere_builder.create_atmosphere_from_config(
+            scene_description
+        )
+
+        illumination = self.sensor_translator.translate_illumination()
+
+        # Create distant_flux measure for BHR
+        measure = self.sensor_translator.create_distant_flux_measure(
+            bhr_config, target_coords, is_reference
+        )
+        measures = [measure]
+
+        logger.debug(
+            f"BHR experiment measure: {measure.get('id')} (reference={is_reference})"
+        )
+
+        geometry = self.atmosphere_builder.create_geometry_from_atmosphere(
+            scene_description
+        )
+
+        self.surface_builder.validate_material_ids(kdict, scene_description)
+
+        return AtmosphereExperiment(
+            geometry=geometry,
+            atmosphere=atmosphere_obj,
+            surface=None,
+            illumination=illumination,
+            measures=measures,
+            kdict=kdict,
+            kpmap=kpmap,
+        )
+
     def _log_simulation_summary(self) -> None:
         """Log a clear simulation summary with measurement type breakdown."""
         from collections import Counter
@@ -650,7 +760,7 @@ class EradiateBackend(SimulationBackend):
         pixel_configs = [
             m
             for m in self.simulation_config.measurements
-            if isinstance(m, (PixelHDRFConfig, PixelBRFConfig))
+            if isinstance(m, (PixelHDRFConfig, PixelBRFConfig, PixelBHRConfig))
         ]
 
         if not pixel_configs:
@@ -735,6 +845,18 @@ class EradiateBackend(SimulationBackend):
                     terrain_relative_height=True,
                 ),
                 **base_kwargs,
+            )
+        elif isinstance(pixel_config, PixelBHRConfig):
+            return BHRConfig(
+                id=f"{pixel_config.id}_r{row}_c{col}",
+                target_x=x,
+                target_y=y,
+                target_z=0,
+                height_offset_m=pixel_config.height_offset_m,
+                terrain_relative_height=True,
+                srf=srf,
+                samples_per_pixel=pixel_config.samples_per_pixel,
+                reference_height_offset_m=pixel_config.reference_height_offset_m,
             )
         else:  # PixelBRFConfig
             return BRFConfig(**base_kwargs)

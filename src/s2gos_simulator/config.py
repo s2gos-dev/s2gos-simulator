@@ -463,7 +463,7 @@ class BRFConfig(BaseModel):
 
     # Optional overrides
     srf: Optional[SRFType] = Field(None, description="Spectral response function")
-    samples_per_pixel: int = Field(default=512, ge=1)
+    samples_per_pixel: int = Field(default=1024, ge=1)
     terrain_relative_height: bool = Field(default=True)
 
     @model_validator(mode="after")
@@ -630,6 +630,23 @@ class PixelBRFConfig(BasePixelMeasurementConfig):
     """
 
     type: Literal["pixel_brf"] = "pixel_brf"
+
+
+class PixelBHRConfig(BasePixelMeasurementConfig):
+    """BHR measurement at satellite pixel centers (WITH atmosphere).
+
+    BHR = radiosity_surface / radiosity_white_reference
+
+    Uses satellite sensor geometry to map pixels to scene coordinates.
+    Requires 2N simulations for N pixels (surface + reference per pixel).
+    """
+
+    type: Literal["pixel_bhr"] = "pixel_bhr"
+    reference_height_offset_m: float = Field(
+        default=0.1,
+        ge=0.0,
+        description="Height offset for white reference patch above surface (meters)",
+    )
 
 
 class HCRFPostProcessingConfig(BaseModel):
@@ -890,7 +907,11 @@ class RadianceConfig(HemisphericalMeasurementLocation):
 class BHRConfig(HemisphericalMeasurementLocation):
     """Configuration for Bi-Hemispherical Reflectance (BHR) measurement.
 
-    BHR integrates reflectance over all viewing and illumination directions.
+    BHR = radiosity_surface / radiosity_white_reference
+
+    Uses distant_flux measure type in Eradiate. Requires two simulations
+    per measurement: one for the surface radiosity and one for a white
+    reference patch (ρ=1.0 Lambertian disk) at the same location.
     """
 
     type: Literal["bhr"] = "bhr"
@@ -898,9 +919,10 @@ class BHRConfig(HemisphericalMeasurementLocation):
         None,
         description="Unique identifier",
     )
-    integration_mode: Literal["full", "isotropic"] = Field(
-        default="full",
-        description="Integration mode: 'full' for complete integration, 'isotropic' for isotropic assumption",
+    reference_height_offset_m: float = Field(
+        default=0.1,
+        ge=0.0,
+        description="Height offset for white reference patch above surface (meters)",
     )
 
 
@@ -912,6 +934,7 @@ MeasurementConfig = Annotated[
         HCRFConfig,
         PixelHDRFConfig,
         PixelBRFConfig,
+        PixelBHRConfig,
         RadianceConfig,
         BHRConfig,
     ],
