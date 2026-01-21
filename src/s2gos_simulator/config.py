@@ -497,7 +497,7 @@ class HDRFConfig(BaseModel):
     """
 
     type: Literal["hdrf"] = "hdrf"
-    id: Optional[str] = Field(None, description="Unique identifier")
+    id: str = Field(description="Unique identifier")
 
     # Mode 1: Reference existing sensor + measurement
     radiance_sensor_id: Optional[str] = Field(
@@ -526,7 +526,7 @@ class HDRFConfig(BaseModel):
         64, description="Samples per pixel for auto-generated sensors"
     )
     terrain_relative_height: bool = Field(
-        False, description="Terrain-relative height interpretation"
+        True, description="Terrain-relative height interpretation"
     )
 
     @model_validator(mode="after")
@@ -687,7 +687,7 @@ class HCRFConfig(BaseModel):
     """
 
     type: Literal["hcrf"] = "hcrf"
-    id: Optional[str] = Field(None, description="Unique identifier")
+    id: str = Field(description="Unique identifier")
 
     # Mode 1: Reference existing sensor + measurement
     radiance_sensor_id: Optional[str] = Field(
@@ -716,7 +716,7 @@ class HCRFConfig(BaseModel):
         description="Height offset for reference irradiance disk (auto-generation)",
     )
     samples_per_pixel: int = Field(64, description="Samples per pixel")
-    terrain_relative_height: bool = Field(False, description="Terrain-relative height")
+    terrain_relative_height: bool = Field(True, description="Terrain-relative height")
     post_processing: Optional[HCRFPostProcessingConfig] = Field(
         None, description="Post-processing configuration"
     )

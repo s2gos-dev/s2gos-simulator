@@ -18,6 +18,7 @@ from .result_processor import ResultProcessor
 from .sensor_translator import SensorTranslator
 from .surface_builder import SurfaceBuilder
 from ..base import SimulationBackend
+from ...brf_processor import BRFProcessor
 from ...config import (
     AngularFromOriginViewing,
     BRFConfig,
@@ -30,6 +31,8 @@ from ...config import (
     PlatformType,
     SimulationConfig,
 )
+from ...hdrf_processor import HDRFProcessor
+from ...irradiance_processor import IrradianceProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -245,10 +248,13 @@ class EradiateBackend(SimulationBackend):
 
         self._log_simulation_summary()
 
+        # Initialize processors
+        brf_proc = BRFProcessor(self)
+        hdrf_proc = HDRFProcessor(self)
+        irr_proc = IrradianceProcessor(self)
+
         # Separate BRF measurements from others (BRF needs no atmosphere)
-        brf_configs = [
-            m for m in self.simulation_config.measurements if isinstance(m, BRFConfig)
-        ]
+        brf_configs = brf_proc.get_brf_configs()
         non_brf_measurements = [
             m
             for m in self.simulation_config.measurements
@@ -256,11 +262,7 @@ class EradiateBackend(SimulationBackend):
         ]
 
         # Extract BRF sensor IDs so we can exclude them from standard/HDRF workflow
-        brf_sensor_ids = {
-            config.radiance_sensor_id
-            for config in brf_configs
-            if config.radiance_sensor_id
-        }
+        brf_sensor_ids = brf_proc.get_brf_sensor_ids()
 
         non_brf_sensor_ids = (
             {s.id for s in self.simulation_config.sensors if s.id not in brf_sensor_ids}
@@ -268,11 +270,6 @@ class EradiateBackend(SimulationBackend):
             else None
         )  # None means "all sensors"
 
-        from ...hdrf_processor import HDRFProcessor
-        from ...irradiance_processor import IrradianceProcessor
-
-        hdrf_proc = HDRFProcessor(self)
-        irr_proc = IrradianceProcessor(self)
         requires_hdrf = hdrf_proc.requires_hdrf()
         requires_irr = irr_proc.requires_irradiance()
 
@@ -284,7 +281,7 @@ class EradiateBackend(SimulationBackend):
                 scene_description,
                 scene_dir,
                 output_dir,
-                brf_configs,
+                brf_proc,
                 **kwargs,
             )
             all_results.update(brf_results)
@@ -296,6 +293,7 @@ class EradiateBackend(SimulationBackend):
                     scene_dir,
                     output_dir,
                     irr_proc,
+                    hdrf_proc,
                     sensor_ids=non_brf_sensor_ids,
                     **kwargs,
                 )
@@ -376,7 +374,8 @@ class EradiateBackend(SimulationBackend):
         scene_description: SceneDescription,
         scene_dir: UPath,
         output_dir: UPath,
-        irradiance_processor,
+        irradiance_processor: IrradianceProcessor,
+        hdrf_processor: HDRFProcessor,
         sensor_ids: Optional[set] = None,
         **kwargs,
     ) -> xr.Dataset:
@@ -413,10 +412,12 @@ class EradiateBackend(SimulationBackend):
 
         combined_results = {**sensor_results, **irr_results}
 
-        derived_results = self.sensor_translator.compute_derived_measurements(
-            combined_results
-        )
         derived_output_dir = output_dir / "derived_results"
+
+        derived_results = hdrf_processor.compute_h_reflectances(
+            combined_results, derived_output_dir
+        )
+
         for derived_name, dataset in derived_results.items():
             derived_output = (
                 derived_output_dir
@@ -440,7 +441,7 @@ class EradiateBackend(SimulationBackend):
         scene_description: SceneDescription,
         scene_dir: UPath,
         output_dir: UPath,
-        brf_configs: List[BRFConfig],
+        brf_proc: BRFProcessor,
         **kwargs,
     ) -> dict:
         """Execute BRF workflow without atmosphere.
@@ -453,7 +454,6 @@ class EradiateBackend(SimulationBackend):
             scene_description: Scene description
             scene_dir: Scene directory path
             output_dir: Output directory
-            brf_configs: List of BRFConfig measurements to process
             **kwargs: Additional options
 
         Returns:
@@ -463,11 +463,7 @@ class EradiateBackend(SimulationBackend):
         logger.info("Running BRF (no atmosphere)")
         logger.info("=" * 60)
 
-        brf_sensor_ids = {
-            config.radiance_sensor_id
-            for config in brf_configs
-            if config.radiance_sensor_id
-        }
+        brf_sensor_ids = brf_proc.get_brf_sensor_ids()
 
         experiment = self._create_experiment(
             scene_description,
@@ -491,18 +487,10 @@ class EradiateBackend(SimulationBackend):
             raw_results
         )
 
-        brf_results = self.sensor_translator.compute_brf_measurements(
-            processed_results, brf_configs
-        )
-
         brf_output_dir = output_dir / "brf_results"
-        for brf_name, dataset in brf_results.items():
-            brf_output = (
-                brf_output_dir / f"{self.simulation_config.name}_{brf_name}.zarr"
-            )
-            dataset.attrs["id"] = brf_name
-            dataset.to_zarr(brf_output, mode="w")
-            logger.info(f"BRF measure '{brf_name}' saved to {brf_output}")
+        brf_results = brf_proc.compute_all_brf_measurements(
+            processed_results, output_dir=brf_output_dir
+        )
 
         all_results = {**processed_results, **brf_results}
         logger.info(f"\nBRF workflow complete: {len(brf_results)} BRF measurements")
