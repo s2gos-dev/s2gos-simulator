@@ -72,6 +72,9 @@ class SensorProcessor:
         """Apply sensor-specific post-processing.
 
         Dispatches to the appropriate processing method based on sensor type.
+        Processing order:
+        1. Check for Gaussian SRF (works for any sensor with gaussian SRF type)
+        2. Fall back to instrument-specific processing (HYPSTAR, etc.)
 
         Args:
             dataset: Raw simulation result
@@ -80,13 +83,141 @@ class SensorProcessor:
         Returns:
             Post-processed dataset
         """
-        from ..config import GroundInstrumentType, GroundSensor
+        import logging
 
+        from ..config import GroundInstrumentType, GroundSensor, SpectralResponse
+
+        logger = logging.getLogger(__name__)
+
+        # Check for Gaussian SRF type - applies to any sensor (satellite, ground, UAV)
+        if hasattr(sensor, "srf") and sensor.srf is not None:
+            if (
+                isinstance(sensor.srf, SpectralResponse)
+                and sensor.srf.type == "gaussian"
+            ):
+                logger.info(
+                    f"Applying Gaussian SRF post-processing to sensor '{sensor.id}'"
+                )
+                return self._apply_gaussian_srf_from_config(dataset, sensor.srf)
+
+        # Instrument-specific processing (HYPSTAR has its own SRF handling)
         if isinstance(sensor, GroundSensor):
             if sensor.instrument == GroundInstrumentType.HYPSTAR:
                 return self._apply_hypstar_post_processing(dataset, sensor)
 
         return dataset
+
+    def _apply_gaussian_srf_from_config(
+        self, dataset: xr.Dataset, srf_config
+    ) -> xr.Dataset:
+        """Apply Gaussian SRF convolution using SpectralResponse configuration.
+
+        This is a generalized method that works for any sensor with gaussian SRF type,
+        including CHIME satellite (2D imagery), HYPSTAR (point measurements after
+        spatial averaging), and future hyperspectral instruments.
+
+        The Gaussian convolution is applied to radiance data at each target wavelength,
+        using wavelength-dependent FWHM from spectral_regions or a single fwhm_nm.
+
+        For 2D satellite data (with x_index, y_index dimensions), the spatial structure
+        is preserved and the output has shape (n_wavelengths, ny, nx).
+
+        Args:
+            dataset: Raw simulation result dataset with radiance data
+            srf_config: SpectralResponse with type="gaussian"
+
+        Returns:
+            Dataset with Gaussian SRF convolution applied to radiance.
+            Preserves spatial dimensions for 2D data (satellite imagery).
+        """
+        import logging
+
+        import eradiate
+        from eradiate.pipelines.logic import apply_spectral_response
+        from eradiate.spectral.response import make_gaussian
+
+        logger = logging.getLogger(__name__)
+
+        if "radiance" not in dataset:
+            logger.warning("No radiance data found, skipping Gaussian SRF processing")
+            return dataset
+
+        radiance = dataset["radiance"]
+        print(dataset)
+        # Generate target wavelengths from output_grid
+        target_wavelengths = srf_config.output_grid.generate_wavelengths()
+        logger.info(
+            f"Applying Gaussian SRF to {len(target_wavelengths)} wavelengths "
+            f"({target_wavelengths.min():.1f}-{target_wavelengths.max():.1f} nm)"
+        )
+
+        # Check required bin edge coordinates for SRF application
+        required_coords = {"bin_wmin", "bin_wmax"}
+        if not required_coords.issubset(set(radiance.coords.keys())):
+            raise ValueError(
+                f"Radiance missing required SRF coordinates: {required_coords}. "
+                f"Available: {set(radiance.coords.keys())}. "
+                f"Eradiate simulations should include bin edge coordinates."
+            )
+
+        # Detect if this is 2D satellite data (has spatial dimensions)
+        spatial_dims = [d for d in ["x_index", "y_index"] if d in radiance.dims]
+        is_2d_data = len(spatial_dims) == 2
+
+        if is_2d_data:
+            logger.info(
+                f"Processing 2D satellite data with spatial dims: {spatial_dims}"
+            )
+
+        # Apply Gaussian SRF at each target wavelength
+        processed_bands = []
+        for wl in target_wavelengths:
+            fwhm = srf_config.get_fwhm_for_wavelength(wl)
+            gaussian_srf = make_gaussian(wl, fwhm, pad=True)
+            band_srf = eradiate.spectral.BandSRF.from_dataarray(gaussian_srf.srf)
+            l_srf = apply_spectral_response(radiance, band_srf)
+            processed_bands.append(l_srf)
+
+        # Build result DataArray - preserve spatial dimensions for 2D data
+        if is_2d_data:
+            # Stack along wavelength dimension, preserving spatial dims
+            # Each l_srf has shape (ny, nx) or (ny, nx, saa, sza, ...), stack along new 'w' dim
+            result_radiance = xr.concat(processed_bands, dim="w")
+            result_radiance = result_radiance.assign_coords(w=target_wavelengths)
+            # Reorder dims to put 'w' first, then spatial dims, then any others
+            # Use ellipsis (...) to handle any additional dimensions (saa, sza, etc.)
+            other_dims = [
+                d for d in result_radiance.dims if d not in ["w", "y_index", "x_index"]
+            ]
+            result_radiance = result_radiance.transpose(
+                "w", "y_index", "x_index", *other_dims
+            )
+        else:
+            # 1D case (point measurement or already spatially averaged)
+            data_array = np.array(
+                [float(band.values.squeeze()) for band in processed_bands],
+                dtype=np.float64,
+            )
+            result_radiance = xr.DataArray(
+                data=data_array,
+                dims=["w"],
+                coords={"w": target_wavelengths},
+            )
+
+        result_radiance = result_radiance.sortby("w")
+        result_radiance.attrs = {
+            **radiance.attrs,
+            "gaussian_srf_applied": True,
+            "srf_type": "gaussian",
+        }
+        toa_irradiance_interpolated = dataset.irradiance.interp(w=result_radiance.w)
+        return xr.Dataset(
+            {
+                "radiance": result_radiance,
+                "toa_irradiance": toa_irradiance_interpolated,
+            },
+            attrs={**dataset.attrs, "gaussian_srf_post_processed": True},
+        )
 
     def _apply_hypstar_post_processing(self, dataset: xr.Dataset, sensor) -> xr.Dataset:
         """Apply HYPSTAR-specific post-processing.

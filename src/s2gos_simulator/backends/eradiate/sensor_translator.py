@@ -618,14 +618,22 @@ class SensorTranslator:
     def translate_srf(self, srf) -> Union[Dict[str, Any], str]:
         """Translate generic SRF to Eradiate format.
 
+        For gaussian SRF, returns a uniform SRF covering the full wavelength range.
+        The actual Gaussian convolution is applied during post-processing, which is
+        more efficient than running individual per-wavelength simulations.
+
         Args:
-            srf: SRF configuration object
+            srf: SRF configuration object (SpectralResponse or str)
 
         Returns:
             Eradiate SRF dictionary or identifier string
         """
         if srf is None:
             return None
+
+        # Handle string SRF (dataset identifier)
+        if isinstance(srf, str):
+            return srf
 
         if srf.type == "delta":
             return {
@@ -640,6 +648,29 @@ class SensorTranslator:
             }
         elif srf.type == "dataset":
             return srf.dataset_id
+        elif srf.type == "gaussian":
+            # Gaussian SRF: use uniform for simulation, apply convolution in post-processing
+            # This is much more efficient than running per-wavelength simulations
+            grid = srf.output_grid
+            if grid.mode == "regular":
+                wmin = grid.wmin_nm
+                wmax = grid.wmax_nm
+            elif grid.mode == "explicit":
+                wmin = min(grid.wavelengths_nm)
+                wmax = max(grid.wavelengths_nm)
+            else:
+                # For from_file mode, fall back to common hyperspectral range
+                wmin = 400.0
+                wmax = 2500.0
+                logger.warning(
+                    f"Gaussian SRF with from_file grid: using default range {wmin}-{wmax}nm for simulation. "
+                    f"Consider specifying explicit wavelength range."
+                )
+            return {
+                "type": "uniform",
+                "wmin": wmin,
+                "wmax": wmax,
+            }
         elif srf.type == "platform":
             return self.resolve_platform_srf(srf.platform, srf.instrument, srf.band)
         else:

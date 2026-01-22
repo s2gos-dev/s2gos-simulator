@@ -118,7 +118,7 @@ PLATFORM_INSTRUMENTS = {
     SatellitePlatform.LANDSAT_9: [SatelliteInstrument.OLI],  # TODO: Implement
     SatellitePlatform.MODIS_TERRA: [SatelliteInstrument.MODIS],  # TODO: Implement
     SatellitePlatform.MODIS_AQUA: [SatelliteInstrument.MODIS],  # TODO: Implement
-    SatellitePlatform.CHIME: [SatelliteInstrument.VNIR],  # TODO: Implement
+    SatellitePlatform.CHIME: [SatelliteInstrument.HSI],
     SatellitePlatform.ENDMAP: [SatelliteInstrument.HSI],  # TODO: Implement
     SatellitePlatform.CUSTOM: [SatelliteInstrument.CUSTOM],
 }
@@ -145,21 +145,168 @@ class ProcessingLevel(str, Enum):
     L1C = "l1c"  # Orthorectified
 
 
-class SpectralResponse(BaseModel):
-    """Spectral response function configuration."""
+class SpectralRegion(BaseModel):
+    """Define a spectral region with specific FWHM.
 
-    type: Literal["delta", "uniform", "dataset"] = "delta"
+    Used for wavelength-dependent Gaussian SRF where different
+    spectral regions have different spectral resolution.
+
+    Example:
+        SpectralRegion(name="VNIR", wmin_nm=400, wmax_nm=1000, fwhm_nm=8.5)
+    """
+
+    name: str = Field(..., description="Region identifier (e.g., 'VNIR', 'SWIR1')")
+    wmin_nm: float = Field(..., ge=0, description="Minimum wavelength (nm)")
+    wmax_nm: float = Field(..., description="Maximum wavelength (nm)")
+    fwhm_nm: float = Field(..., gt=0, description="Full Width at Half Maximum (nm)")
+
+    @model_validator(mode="after")
+    def validate_range(self):
+        if self.wmax_nm <= self.wmin_nm:
+            raise ValueError(
+                f"wmax_nm ({self.wmax_nm}) must be > wmin_nm ({self.wmin_nm})"
+            )
+        return self
+
+
+class WavelengthGrid(BaseModel):
+    """Configuration for output wavelength grid.
+
+    Supports three modes:
+    1. Regular grid: wmin_nm/wmax_nm/step_nm (Spectral Sampling Interval)
+    2. Explicit wavelengths: list of specific wavelengths
+    3. From file: extract wavelengths from external NetCDF/CSV file
+
+    Example:
+        # CHIME-like regular grid (400-2500nm @ 8.4nm SSI)
+        WavelengthGrid(mode="regular", wmin_nm=400, wmax_nm=2500, step_nm=8.4)
+
+        # Explicit wavelengths
+        WavelengthGrid(mode="explicit", wavelengths_nm=[450, 550, 650, 850])
+
+        # From reference file
+        WavelengthGrid(mode="from_file", file_path="reference.nc", wavelength_variable="wavelength")
+    """
+
+    mode: Literal["regular", "explicit", "from_file"] = "regular"
+
+    # Regular grid mode
+    wmin_nm: Optional[float] = Field(None, ge=0, description="Minimum wavelength (nm)")
+    wmax_nm: Optional[float] = Field(None, description="Maximum wavelength (nm)")
+    step_nm: Optional[float] = Field(
+        None, gt=0, description="Wavelength step / Spectral Sampling Interval (nm)"
+    )
+
+    # Explicit mode
+    wavelengths_nm: Optional[List[float]] = Field(
+        None, description="Explicit list of wavelengths (nm)"
+    )
+
+    # From file mode
+    file_path: Optional[str] = Field(
+        None, description="Path to wavelength reference file (NetCDF or CSV)"
+    )
+    wavelength_variable: str = Field(
+        "wavelength", description="Variable/column name for wavelengths in file"
+    )
+
+    @model_validator(mode="after")
+    def validate_mode(self):
+        if self.mode == "regular":
+            if self.wmin_nm is None or self.wmax_nm is None:
+                raise ValueError("Regular mode requires wmin_nm and wmax_nm")
+            if self.step_nm is None:
+                raise ValueError("Regular mode requires step_nm (SSI)")
+            if self.wmax_nm <= self.wmin_nm:
+                raise ValueError(
+                    f"wmax_nm ({self.wmax_nm}) must be > wmin_nm ({self.wmin_nm})"
+                )
+        elif self.mode == "explicit":
+            if not self.wavelengths_nm or len(self.wavelengths_nm) == 0:
+                raise ValueError("Explicit mode requires wavelengths_nm list")
+        elif self.mode == "from_file":
+            if not self.file_path:
+                raise ValueError("from_file mode requires file_path")
+        return self
+
+    def generate_wavelengths(self) -> "np.ndarray":
+        """Generate wavelength array based on configuration.
+
+        Returns:
+            numpy array of wavelengths in nm
+        """
+        import numpy as np
+
+        if self.mode == "regular":
+            # Include endpoint by adding half step to avoid floating point issues
+            return np.arange(
+                self.wmin_nm, self.wmax_nm + self.step_nm / 2, self.step_nm
+            )
+        elif self.mode == "explicit":
+            return np.array(sorted(self.wavelengths_nm), dtype=np.float64)
+        elif self.mode == "from_file":
+            import xarray as xr
+
+            ds = xr.open_dataset(self.file_path)
+            return ds[self.wavelength_variable].values
+        else:
+            raise ValueError(f"Unknown mode: {self.mode}")
+
+
+class SpectralResponse(BaseModel):
+    """Spectral response function configuration.
+
+    Supports multiple SRF types:
+    - delta: Discrete wavelength points -> Eradiate's multi_delta
+    - uniform: Wavelength range (wmin, wmax) -> Eradiate's uniform
+    - dataset: String ID for predefined SRFs -> Eradiate's internal database
+    - gaussian: Gaussian SRF with configurable FWHM (for hyperspectral instruments)
+
+    Gaussian SRF Example (CHIME-like):
+        SpectralResponse(
+            type="gaussian",
+            spectral_regions=[
+                SpectralRegion(name="VNIR", wmin_nm=400, wmax_nm=1000, fwhm_nm=8.5),
+                SpectralRegion(name="SWIR1", wmin_nm=1000, wmax_nm=1800, fwhm_nm=10.0),
+                SpectralRegion(name="SWIR2", wmin_nm=1800, wmax_nm=2500, fwhm_nm=11.0),
+            ],
+            output_grid=WavelengthGrid(mode="regular", wmin_nm=400, wmax_nm=2500, step_nm=8.4),
+        )
+    """
+
+    type: Literal["delta", "uniform", "dataset", "gaussian"] = "delta"
+
+    # Delta SRF fields
     wavelengths: Optional[List[float]] = Field(
         None,
-        description="Wavelengths in nm for delta SRF or center wavelength for gaussian SRF",
+        description="Wavelengths in nm for delta SRF",
     )
+
+    # Uniform SRF fields
     wmin: Optional[float] = Field(
         None, description="Minimum wavelength for uniform SRF"
     )
     wmax: Optional[float] = Field(
         None, description="Maximum wavelength for uniform SRF"
     )
+
+    # Dataset SRF fields
     dataset_id: Optional[str] = Field(None, description="Dataset ID for predefined SRF")
+
+    # Gaussian SRF fields
+    fwhm_nm: Optional[float] = Field(
+        None,
+        gt=0,
+        description="Single FWHM for all wavelengths (nm). Use this OR spectral_regions.",
+    )
+    spectral_regions: Optional[List[SpectralRegion]] = Field(
+        None,
+        description="Wavelength-dependent FWHM via spectral regions. Use this OR fwhm_nm.",
+    )
+    output_grid: Optional[WavelengthGrid] = Field(
+        None,
+        description="Output wavelength grid configuration. Required for gaussian type.",
+    )
 
     @field_validator("wavelengths")
     @classmethod
@@ -176,7 +323,44 @@ class SpectralResponse(BaseModel):
             raise ValueError("Uniform SRF requires wmin and wmax")
         elif self.type == "dataset" and not self.dataset_id:
             raise ValueError("Dataset SRF requires dataset_id")
+        elif self.type == "gaussian":
+            has_single_fwhm = self.fwhm_nm is not None
+            has_regions = (
+                self.spectral_regions is not None and len(self.spectral_regions) > 0
+            )
+            if not (has_single_fwhm or has_regions):
+                raise ValueError("Gaussian SRF requires fwhm_nm OR spectral_regions")
+            if has_single_fwhm and has_regions:
+                raise ValueError("Specify fwhm_nm OR spectral_regions, not both")
+            if not self.output_grid:
+                raise ValueError("Gaussian SRF requires output_grid configuration")
         return self
+
+    def get_fwhm_for_wavelength(self, wavelength_nm: float) -> float:
+        """Get FWHM for a given wavelength.
+
+        For single fwhm_nm: returns that value for all wavelengths.
+        For spectral_regions: returns FWHM of the region containing the wavelength.
+
+        Args:
+            wavelength_nm: Wavelength in nanometers
+
+        Returns:
+            FWHM in nanometers for that wavelength
+        """
+        if self.fwhm_nm is not None:
+            return self.fwhm_nm
+
+        if self.spectral_regions:
+            for region in self.spectral_regions:
+                if region.wmin_nm <= wavelength_nm < region.wmax_nm:
+                    return region.fwhm_nm
+            # Fallback: use nearest region if wavelength is outside all regions
+            if wavelength_nm < self.spectral_regions[0].wmin_nm:
+                return self.spectral_regions[0].fwhm_nm
+            return self.spectral_regions[-1].fwhm_nm
+
+        raise ValueError("No FWHM configuration available")
 
 
 # TODO: Perhaps it can be less eradiate specific?
@@ -1293,6 +1477,119 @@ def create_custom_satellite_sensor(
         band=band_name,
         srf=srf,
         viewing=AngularViewing(zenith=zenith, azimuth=azimuth),
+        **kwargs,
+    )
+
+
+# =============================================================================
+# CHIME Hyperspectral Satellite Support
+# =============================================================================
+
+# CHIME (Copernicus Hyperspectral Imaging Mission) spectral characteristics
+# Based on ESA specifications:
+# - Spectral range: 400-2500 nm
+# - Spectral resolution: < 11 nm (worst case at FOV edge)
+# - Spectral Sampling Interval (SSI): 8.4 nm
+# - Spatial resolution: 30 m
+# - Swath: ~130 km
+CHIME_SPECTRAL_REGIONS = [
+    SpectralRegion(name="VNIR", wmin_nm=400.0, wmax_nm=1000.0, fwhm_nm=8.5),
+    SpectralRegion(name="SWIR1", wmin_nm=1000.0, wmax_nm=1800.0, fwhm_nm=10.0),
+    SpectralRegion(name="SWIR2", wmin_nm=1800.0, wmax_nm=2500.0, fwhm_nm=11.0),
+]
+
+CHIME_SPECTRAL_CONFIG = {
+    "wmin_nm": 400.0,
+    "wmax_nm": 2500.0,
+    "ssi_nm": 8.4,  # Spectral Sampling Interval
+    "spatial_resolution_m": 30.0,
+    "swath_km": 130.0,
+    "spectral_regions": CHIME_SPECTRAL_REGIONS,
+}
+
+
+def create_chime_sensor(
+    target_center_lat: float,
+    target_center_lon: float,
+    target_size_km: Union[float, Tuple[float, float]] = 1.0,
+    zenith: float = 0.0,
+    azimuth: float = 0.0,
+    samples_per_pixel: int = 64,
+    ssi_nm: float = 8.4,
+    fwhm_nm: Optional[float] = None,
+    spectral_regions: Optional[List[SpectralRegion]] = None,
+    wmin_nm: float = 400.0,
+    wmax_nm: float = 2500.0,
+    sensor_id: Optional[str] = None,
+    **kwargs,
+) -> SatelliteSensor:
+    """Create a CHIME hyperspectral satellite sensor with sensible defaults.
+
+    CHIME (Copernicus Hyperspectral Imaging Mission) specifications:
+    - Spectral range: 400-2500 nm
+    - Spectral resolution: < 11 nm (FWHM)
+    - Spectral Sampling Interval (SSI): 8.4 nm
+    - Spatial resolution: 30 m
+    - Swath: ~130 km
+
+    The sensor uses Gaussian SRF post-processing with wavelength-dependent FWHM
+    to simulate the instrument's spectral response characteristics.
+
+    Args:
+        target_center_lat: Target center latitude (WGS84 decimal degrees)
+        target_center_lon: Target center longitude (WGS84 decimal degrees)
+        target_size_km: Target area size (km). Float for square, tuple for (width, height)
+        zenith: Viewing zenith angle (0=nadir). Default 0.0
+        azimuth: Viewing azimuth angle. Default 0.0
+        samples_per_pixel: Monte Carlo samples per pixel. Default 64
+        ssi_nm: Spectral Sampling Interval (nm). Default 8.4 per CHIME spec
+        fwhm_nm: Single FWHM for all wavelengths (overrides spectral_regions)
+        spectral_regions: Wavelength-dependent FWHM regions. If None, uses CHIME defaults
+        wmin_nm: Minimum wavelength (nm). Default 400.0
+        wmax_nm: Maximum wavelength (nm). Default 2500.0
+        sensor_id: Optional sensor ID. Auto-generated if not provided
+        **kwargs: Additional sensor parameters
+
+    Returns:
+        SatelliteSensor configured for CHIME hyperspectral simulation
+    """
+    # Use CHIME default spectral regions if not provided
+    if spectral_regions is None and fwhm_nm is None:
+        spectral_regions = CHIME_SPECTRAL_REGIONS
+
+    # Build Gaussian SRF configuration
+    srf = SpectralResponse(
+        type="gaussian",
+        fwhm_nm=fwhm_nm,
+        spectral_regions=spectral_regions if fwhm_nm is None else None,
+        output_grid=WavelengthGrid(
+            mode="regular",
+            wmin_nm=wmin_nm,
+            wmax_nm=wmax_nm,
+            step_nm=ssi_nm,
+        ),
+    )
+
+    # Generate sensor ID if not provided
+    if sensor_id is None:
+        if zenith > 0:
+            sensor_id = f"chime_hsi_oblique{int(zenith)}"
+        else:
+            sensor_id = "chime_hsi_nadir"
+    film_size = (target_size_km * 1000) // 30
+    adjusted_target_size = (film_size * 30) / 1000
+    return SatelliteSensor(
+        id=sensor_id,
+        platform=SatellitePlatform.CHIME,
+        instrument=SatelliteInstrument.HSI,
+        band="full",  # Hyperspectral uses full spectrum, not discrete bands
+        viewing=AngularViewing(zenith=zenith, azimuth=azimuth),
+        film_resolution=(film_size, film_size),
+        target_center_lat=target_center_lat,
+        target_center_lon=target_center_lon,
+        target_size_km=adjusted_target_size,
+        samples_per_pixel=samples_per_pixel,
+        srf=srf,
         **kwargs,
     )
 

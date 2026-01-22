@@ -5,6 +5,8 @@
 from .backends import ERADIATE_AVAILABLE, EradiateSimulator
 from .backends.eradiate.backend import EradiateBackend
 from .config import (
+    CHIME_SPECTRAL_CONFIG,
+    CHIME_SPECTRAL_REGIONS,
     AngularFromOriginViewing,
     AngularViewing,
     BHRConfig,
@@ -24,9 +26,12 @@ from .config import (
     RadianceConfig,
     SatelliteSensor,
     SimulationConfig,
+    SpectralRegion,
     SpectralResponse,
     UAVInstrumentType,
     UAVSensor,
+    WavelengthGrid,
+    create_chime_sensor,
 )
 from .hdrf_processor import HDRFProcessor
 
@@ -46,6 +51,8 @@ __all__ = [
     "HemisphericalViewing",
     "HemisphericalMeasurementLocation",
     "SpectralResponse",
+    "SpectralRegion",
+    "WavelengthGrid",
     "PlatformType",
     "UAVInstrumentType",
     "GroundInstrumentType",
@@ -57,6 +64,10 @@ __all__ = [
     "BRFConfig",
     "RadianceConfig",
     "BHRConfig",
+    # CHIME Hyperspectral Support
+    "CHIME_SPECTRAL_REGIONS",
+    "CHIME_SPECTRAL_CONFIG",
+    "create_chime_sensor",
     # Backends and Processors
     "EradiateSimulator",
     "EradiateBackend",
