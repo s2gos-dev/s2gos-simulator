@@ -21,7 +21,6 @@ from ..base import SimulationBackend
 from ...bhr_processor import BHRProcessor
 from ...brf_processor import BRFProcessor
 from ...config import (
-    AngularFromOriginViewing,
     BHRConfig,
     BRFConfig,
     DistantViewing,
@@ -867,23 +866,25 @@ class EradiateBackend(SimulationBackend):
         Returns:
             HDRFConfig, BRFConfig, or BHRConfig instance
         """
-        base_kwargs = dict(
-            id=f"{pixel_config.id}_r{row}_c{col}",
-            viewing=AngularFromOriginViewing(
-                origin=[x, y, pixel_config.height_offset_m],
-                zenith=180,
-                up=[0, 1, 0],
-                terrain_relative_height=True,
-            ),
-            srf=srf,
-            samples_per_pixel=pixel_config.samples_per_pixel,
-            terrain_relative_height=True,
-        )
-
         if isinstance(pixel_config, PixelHDRFConfig):
+            # Create rectangle target centered on pixel at specified altitude
+            rectangle_target = RectangleTarget.from_center_and_size(
+                cx=x,
+                cy=y,
+                width=pixel_size_x,
+                height=pixel_size_y,
+                z=target_z,
+            )
+
             return HDRFConfig(
-                instrument="hemispherical",
-                reference_height_offset_m=pixel_config.height_offset_m,
+                id=f"{pixel_config.id}_r{row}_c{col}",
+                instrument="radiancemeter",
+                viewing=DistantViewing(
+                    target=rectangle_target,
+                    direction=[0, 0, 1],
+                    ray_offset=5.0,
+                    terrain_relative_height=False,  # z already computed
+                ),
                 location=HemisphericalMeasurementLocation(
                     target_x=x,
                     target_y=y,
@@ -891,7 +892,10 @@ class EradiateBackend(SimulationBackend):
                     height_offset_m=pixel_config.height_offset_m,
                     terrain_relative_height=True,
                 ),
-                **base_kwargs,
+                reference_height_offset_m=pixel_config.height_offset_m,
+                srf=srf,
+                samples_per_pixel=pixel_config.samples_per_pixel,
+                terrain_relative_height=False,
             )
         elif isinstance(pixel_config, PixelBHRConfig):
             return BHRConfig(
@@ -906,8 +910,6 @@ class EradiateBackend(SimulationBackend):
                 reference_height_offset_m=pixel_config.reference_height_offset_m,
             )
         else:  # PixelBRFConfig
-            # Create rectangle target centered on pixel at specified altitude
-            print(target_z)
             rectangle_target = RectangleTarget.from_center_and_size(
                 cx=x,
                 cy=y,
@@ -920,7 +922,7 @@ class EradiateBackend(SimulationBackend):
                 id=f"{pixel_config.id}_r{row}_c{col}",
                 viewing=DistantViewing(
                     target=rectangle_target,
-                    direction=[0, 0, 1],  # Nadir view
+                    direction=[0, 0, 1],
                     ray_offset=5.0,
                     terrain_relative_height=False,  # z is already computed
                 ),

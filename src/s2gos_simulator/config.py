@@ -612,7 +612,9 @@ class HDRFConfig(BaseModel):
     location: Optional[HemisphericalMeasurementLocation] = Field(
         None, description="Location for hemispherical HDRF (auto-generation)"
     )
-    viewing: Optional[Union[LookAtViewing, AngularFromOriginViewing]] = Field(
+    viewing: Optional[
+        Union[LookAtViewing, AngularFromOriginViewing, DistantViewing]
+    ] = Field(
         None, description="Viewing geometry for radiancemeter HDRF (auto-generation)"
     )
     reference_height_offset_m: Optional[float] = Field(
@@ -651,8 +653,15 @@ class HDRFConfig(BaseModel):
         if has_autogen:
             if self.instrument == "hemispherical" and not self.location:
                 raise ValueError("instrument='hemispherical' requires 'location'")
-            if self.instrument == "radiancemeter" and not self.viewing:
-                raise ValueError("instrument='radiancemeter' requires 'viewing'")
+            if self.instrument == "radiancemeter":
+                if not self.viewing:
+                    raise ValueError("instrument='radiancemeter' requires 'viewing'")
+                # For HDRF, location is also needed for irradiance measurement
+                if not self.location:
+                    raise ValueError(
+                        "instrument='radiancemeter' for HDRF requires 'location' "
+                        "for irradiance measurement generation"
+                    )
             if not self.reference_height_offset_m:
                 raise ValueError(
                     "Auto-generation mode requires 'reference_height_offset_m'"
