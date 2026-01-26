@@ -7,6 +7,7 @@ measure definitions.
 import logging
 from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple, Union
 
+import numpy as np
 import xarray as xr
 from s2gos_utils.coordinates import CoordinateSystem
 from s2gos_utils.scene import SceneDescription
@@ -19,6 +20,7 @@ from ...config import (
     BRFConfig,
     ConstantIllumination,
     DirectionalIllumination,
+    DistantViewing,
     GroundInstrumentType,
     GroundSensor,
     HCRFConfig,
@@ -26,6 +28,7 @@ from ...config import (
     HemisphericalViewing,
     IrradianceConfig,
     LookAtViewing,
+    RectangleTarget,
     SatelliteSensor,
     UAVInstrumentType,
     UAVSensor,
@@ -437,6 +440,16 @@ class SensorTranslator:
         """
         view = sensor.viewing
 
+        if isinstance(view, DistantViewing):
+            return self.translate_distant_viewing_to_mdistant(
+                viewing=view,
+                sensor_id=sensor.id,
+                srf=sensor.srf,
+                spp=sensor.samples_per_pixel,
+                scene_description=scene_description,
+                scene_dir=scene_dir,
+            )
+
         # Handle HYPSTAR special case with post-processing
         if (
             sensor.instrument == GroundInstrumentType.HYPSTAR
@@ -548,6 +561,93 @@ class SensorTranslator:
             )
 
         return base_measure
+
+    def translate_distant_viewing_to_mdistant(
+        self,
+        viewing: DistantViewing,
+        sensor_id: str,
+        srf: Any,
+        spp: int,
+        scene_description: SceneDescription,
+        scene_dir: UPath,
+    ) -> Dict[str, Any]:
+        """Translate DistantViewing to Eradiate mdistant measure.
+
+        Uses Eradiate's MultiDistantMeasure which measures radiance from
+        a distant sensor looking at a target area. Used for pixel-level
+        measurements with rectangular targets.
+
+        Args:
+            viewing: DistantViewing configuration
+            sensor_id: Unique sensor identifier
+            srf: Spectral response function
+            spp: Samples per pixel
+            scene_description: Scene description for terrain lookup
+            scene_dir: Scene directory for terrain data
+
+        Returns:
+            Eradiate mdistant measure dictionary
+        """
+        measure = {
+            "type": "mdistant",
+            "id": sanitize_sensor_id(sensor_id),
+            "srf": self.translate_srf(srf),
+            "spp": spp,
+        }
+
+        # Convert direction vector to angles
+        # Direction [0, 0, 1] means looking down (nadir) -> zenith=0
+        dx, dy, dz = viewing.direction or [0, 0, 1]
+        horiz = np.sqrt(dx**2 + dy**2)
+        zenith = np.degrees(np.arctan2(horiz, dz))
+        azimuth = np.degrees(np.arctan2(dy, dx)) % 360 if horiz > 1e-10 else 0.0
+
+        measure["construct"] = "from_angles"
+        measure["angles"] = [zenith, azimuth]
+
+        # Handle target specification
+        target = viewing.target
+        if target is None:
+            # Default to point target at scene center
+            measure["target"] = [0.0, 0.0, 0.0]
+        elif isinstance(target, RectangleTarget):
+            # Rectangle target for pixel BRF measurements
+            measure["target"] = {
+                "type": "rectangle",
+                "xmin": target.xmin,
+                "xmax": target.xmax,
+                "ymin": target.ymin,
+                "ymax": target.ymax,
+                "z": target.z,
+            }
+            logger.debug(
+                f"DistantViewing sensor '{sensor_id}' using rectangle target: "
+                f"x=[{target.xmin:.1f}, {target.xmax:.1f}], "
+                f"y=[{target.ymin:.1f}, {target.ymax:.1f}], z={target.z:.1f}"
+            )
+        elif isinstance(target, list) and len(target) == 3:
+            # Point target - adjust for terrain if needed
+            x, y, z = target
+            if viewing.terrain_relative_height:
+                terrain_z = self.geometry_utils.query_terrain_elevation(
+                    scene_description, scene_dir, x, y
+                )
+                z = terrain_z + z
+            measure["target"] = [x, y, z]
+            logger.debug(
+                f"DistantViewing sensor '{sensor_id}' using point target: [{x:.1f}, {y:.1f}, {z:.1f}]"
+            )
+        else:
+            raise ValueError(
+                f"Invalid target specification for DistantViewing: {target}. "
+                f"Expected None, [x, y, z], or RectangleTarget."
+            )
+
+        # Optional ray offset
+        if viewing.ray_offset is not None:
+            measure["ray_offset"] = viewing.ray_offset
+
+        return measure
 
     def create_irradiance_measure(
         self, irradiance_config, disk_coords: Tuple[float, float, float]

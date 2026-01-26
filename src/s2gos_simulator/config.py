@@ -381,6 +381,104 @@ class LookAtViewing(BaseViewing):
     )
 
 
+class RectangleTarget(BaseModel):
+    """Rectangle target specification for distant measurements.
+
+    Defines an axis-aligned rectangle at a specific altitude for mdistant targets.
+    Used for pixel-level BRF measurements where we want to measure the reflectance
+    leaving a specific rectangular area.
+    """
+
+    type: Literal["rectangle"] = "rectangle"
+    xmin: float = Field(..., description="Minimum X coordinate in meters")
+    xmax: float = Field(..., description="Maximum X coordinate in meters")
+    ymin: float = Field(..., description="Minimum Y coordinate in meters")
+    ymax: float = Field(..., description="Maximum Y coordinate in meters")
+    z: float = Field(default=0.0, description="Altitude (z-coordinate) in meters")
+
+    @model_validator(mode="after")
+    def validate_bounds(self):
+        """Ensure bounds are valid (min < max)."""
+        if self.xmin >= self.xmax:
+            raise ValueError(f"xmin ({self.xmin}) must be less than xmax ({self.xmax})")
+        if self.ymin >= self.ymax:
+            raise ValueError(f"ymin ({self.ymin}) must be less than ymax ({self.ymax})")
+        return self
+
+    @classmethod
+    def from_center_and_size(
+        cls,
+        cx: float,
+        cy: float,
+        width: float,
+        height: Optional[float] = None,
+        z: float = 0.0,
+    ) -> "RectangleTarget":
+        """Create rectangle from center point, dimensions, and altitude.
+
+        Args:
+            cx: Center X coordinate in meters
+            cy: Center Y coordinate in meters
+            width: Width in meters
+            height: Height in meters (defaults to width for square)
+            z: Altitude in meters (default 0.0)
+
+        Returns:
+            RectangleTarget instance
+        """
+        if height is None:
+            height = width
+        hw, hh = width / 2, height / 2
+        return cls(xmin=cx - hw, xmax=cx + hw, ymin=cy - hh, ymax=cy + hh, z=z)
+
+
+class DistantViewing(BaseViewing):
+    """Distant viewing for BRF measurements using mdistant measure.
+
+    Models an infinitely distant sensor looking at a target area.
+    Uses Eradiate's MultiDistantMeasure with rectangular targets for
+    pixel-level BRF measurements.
+
+    The sensor looks in the direction specified by `direction` (default: [0, 0, 1]
+    meaning looking down from above / nadir view).
+    """
+
+    type: Literal["distant"] = "distant"
+
+    target: Optional[Union[List[float], RectangleTarget]] = Field(
+        default=None,
+        description=(
+            "Target specification. Either:\n"
+            "- [x, y, z] point for a point target\n"
+            "- RectangleTarget for a rectangular area (pixel BRF)"
+        ),
+    )
+
+    direction: List[float] = Field(
+        default=[0, 0, 1],
+        description=(
+            "Viewing direction vector. Default [0, 0, 1] means looking "
+            "straight down (nadir view). For oblique views, adjust accordingly."
+        ),
+    )
+
+    ray_offset: Optional[float] = Field(
+        default=None,
+        description=(
+            "Distance between target and ray origins in meters. "
+            "If unset, ray origins are positioned automatically outside the scene."
+        ),
+    )
+
+    terrain_relative_height: bool = Field(
+        default=True,
+        description=(
+            "For point targets [x, y, z]: if True, z is offset from terrain. "
+            "For RectangleTarget: this field is ignored (rectangles use absolute z)."
+        ),
+    )
+
+
 class HemisphericalViewing(BaseViewing):
     """
     Viewing that covers the entire upper or lower hemisphere.
@@ -412,7 +510,7 @@ ViewingType = Union[
     AngularFromOriginViewing,
     LookAtViewing,
     HemisphericalViewing,
-    # LocationBased removed - use HemisphericalMeasurementLocation for location-based measurements
+    DistantViewing,
 ]
 
 
@@ -457,7 +555,7 @@ class BRFConfig(BaseModel):
     )
 
     # Mode 2: Auto-generation mode
-    viewing: Optional[AngularFromOriginViewing] = Field(
+    viewing: Optional[Union[AngularFromOriginViewing, DistantViewing]] = Field(
         None, description="Viewing geometry for radiancemeter (auto-generation)"
     )
 
@@ -1264,7 +1362,9 @@ class GroundInstrumentType(str, Enum):
 class GroundSensor(BaseSensor):
     platform_type: Literal[PlatformType.GROUND] = PlatformType.GROUND
     instrument: GroundInstrumentType
-    viewing: Union[LookAtViewing, AngularFromOriginViewing]
+    viewing: Union[
+        LookAtViewing, AngularFromOriginViewing, HemisphericalViewing, DistantViewing
+    ]
     fov: Optional[float] = Field(
         None,
         description="Field of view in degrees (for camera-like instruments: HYPSTAR, perspective_camera, dhp_camera)",
@@ -1313,8 +1413,16 @@ class GroundSensor(BaseSensor):
                     f"not '{self.viewing.type}'."
                 )
 
+        # Auto-generate ID if not provided
         if self.id is None:
-            self.id = f"ground_{self.instrument.value}_{int(self.viewing.origin[2])}m"
+            if hasattr(self.viewing, "origin"):
+                self.id = (
+                    f"ground_{self.instrument.value}_{int(self.viewing.origin[2])}m"
+                )
+            elif isinstance(self.viewing, DistantViewing):
+                self.id = f"ground_{self.instrument.value}_distant"
+            else:
+                self.id = f"ground_{self.instrument.value}"
         return self
 
 

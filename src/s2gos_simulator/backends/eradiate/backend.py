@@ -24,6 +24,7 @@ from ...config import (
     AngularFromOriginViewing,
     BHRConfig,
     BRFConfig,
+    DistantViewing,
     GroundInstrumentType,
     HCRFConfig,
     HDRFConfig,
@@ -32,13 +33,13 @@ from ...config import (
     PixelBRFConfig,
     PixelHDRFConfig,
     PlatformType,
+    RectangleTarget,
     SimulationConfig,
 )
 from ...hdrf_processor import HDRFProcessor
 from ...irradiance_processor import IrradianceProcessor
 
 logger = logging.getLogger(__name__)
-
 
 try:
     import eradiate
@@ -248,7 +249,7 @@ class EradiateBackend(SimulationBackend):
 
         mkdir(output_dir)
 
-        self._expand_pixel_measurement_configs()
+        self._expand_pixel_measurement_configs(scene_description, scene_dir)
         self._auto_generate_sensors_for_measurements()
 
         self._log_simulation_summary()
@@ -314,16 +315,16 @@ class EradiateBackend(SimulationBackend):
                     **kwargs,
                 )
                 all_results.update(hdrf_results)
-            elif not brf_configs:
-                logger.info("\nStandard workflow")
-                standard_results = self._run_standard_simulation(
-                    scene_description,
-                    scene_dir,
-                    output_dir,
-                    sensor_ids=non_brf_sensor_ids,
-                    **kwargs,
-                )
-                all_results.update(standard_results)
+            # else:
+            #     logger.info("\nStandard workflow")
+            #     standard_results = self._run_standard_simulation(
+            #         scene_description,
+            #         scene_dir,
+            #         output_dir,
+            #         sensor_ids=non_brf_sensor_ids,
+            #         **kwargs,
+            #     )
+            #     all_results.update(standard_results)
 
         logger.info(f"\n✓ Simulation complete: {len(all_results)} total datasets")
         return all_results
@@ -749,11 +750,19 @@ class EradiateBackend(SimulationBackend):
                     f"Available materials: {available}"
                 )
 
-    def _expand_pixel_measurement_configs(self) -> None:
+    def _expand_pixel_measurement_configs(
+        self,
+        scene_description: Optional[SceneDescription] = None,
+        scene_dir: Optional[UPath] = None,
+    ) -> None:
         """Expand PixelHDRFConfig and PixelBRFConfig into individual measurements.
 
         For each pixel in a pixel measurement config, creates the corresponding
         expanded config (HDRFConfig or BRFConfig) at the scene coordinates.
+
+        Args:
+            scene_description: Scene description for terrain lookup (optional)
+            scene_dir: Scene directory for terrain data (optional)
         """
         from s2gos_utils.coordinates import CoordinateSystem, pixel_to_scene_xy
 
@@ -790,35 +799,73 @@ class EradiateBackend(SimulationBackend):
 
             srf = pixel_config.srf if pixel_config.srf is not None else sensor.srf
 
+            # Get pixel size for BRF rectangle targets
+            pixel_size_x, pixel_size_y = sensor.pixel_size_m
+
             # Expand each pixel to an individual measurement config
             for row, col in pixel_config.pixel_indices:
                 x, y = pixel_to_scene_xy(row, col, bounds, sensor.film_resolution)
+
+                # Query terrain elevation if scene_description is provided
+                target_z = pixel_config.height_offset_m
+                if scene_description is not None and scene_dir is not None:
+                    try:
+                        terrain_z = self.geometry_utils.query_terrain_elevation(
+                            scene_description, scene_dir, x, y
+                        )
+                        target_z = terrain_z + pixel_config.height_offset_m
+                    except Exception as e:
+                        logger.warning(
+                            f"Could not query terrain at ({x:.1f}, {y:.1f}): {e}. "
+                            f"Using height_offset_m={pixel_config.height_offset_m} directly."
+                        )
+
                 expanded = self._create_expanded_measurement(
-                    pixel_config, row, col, x, y, srf
+                    pixel_config,
+                    row,
+                    col,
+                    x,
+                    y,
+                    srf,
+                    pixel_size_x=pixel_size_x,
+                    pixel_size_y=pixel_size_y,
+                    target_z=target_z,
                 )
                 self.simulation_config.measurements.append(expanded)
                 logger.debug(
                     f"Expanded pixel ({row}, {col}) -> {type(expanded).__name__} "
-                    f"'{expanded.id}' at scene ({x:.1f}, {y:.1f})"
+                    f"'{expanded.id}' at scene ({x:.1f}, {y:.1f}, z={target_z:.1f})"
                 )
 
             self.simulation_config.measurements.remove(pixel_config)
 
     def _create_expanded_measurement(
-        self, pixel_config, row: int, col: int, x: float, y: float, srf
+        self,
+        pixel_config,
+        row: int,
+        col: int,
+        x: float,
+        y: float,
+        srf,
+        pixel_size_x: float = 10.0,
+        pixel_size_y: float = 10.0,
+        target_z: float = 0.0,
     ):
         """Create appropriate measurement config from pixel coordinates.
 
         Args:
-            pixel_config: PixelHDRFConfig or PixelBRFConfig instance
+            pixel_config: PixelHDRFConfig, PixelBRFConfig, or PixelBHRConfig instance
             row: Pixel row index
             col: Pixel column index
-            x: Scene x coordinate
-            y: Scene y coordinate
+            x: Scene x coordinate (pixel center)
+            y: Scene y coordinate (pixel center)
             srf: Spectral response function
+            pixel_size_x: Pixel width in meters (for BRF rectangle targets)
+            pixel_size_y: Pixel height in meters (for BRF rectangle targets)
+            target_z: Target z-coordinate (terrain + height_offset for BRF)
 
         Returns:
-            HDRFConfig or BRFConfig instance
+            HDRFConfig, BRFConfig, or BHRConfig instance
         """
         base_kwargs = dict(
             id=f"{pixel_config.id}_r{row}_c{col}",
@@ -859,7 +906,28 @@ class EradiateBackend(SimulationBackend):
                 reference_height_offset_m=pixel_config.reference_height_offset_m,
             )
         else:  # PixelBRFConfig
-            return BRFConfig(**base_kwargs)
+            # Create rectangle target centered on pixel at specified altitude
+            print(target_z)
+            rectangle_target = RectangleTarget.from_center_and_size(
+                cx=x,
+                cy=y,
+                width=pixel_size_x,
+                height=pixel_size_y,
+                z=target_z,
+            )
+
+            return BRFConfig(
+                id=f"{pixel_config.id}_r{row}_c{col}",
+                viewing=DistantViewing(
+                    target=rectangle_target,
+                    direction=[0, 0, 1],  # Nadir view
+                    ray_offset=5.0,
+                    terrain_relative_height=False,  # z is already computed
+                ),
+                srf=srf,
+                samples_per_pixel=pixel_config.samples_per_pixel,
+                terrain_relative_height=False,
+            )
 
     def _auto_generate_sensors_for_measurements(self) -> List[str]:
         """Auto-generate sensors for measurements that require them.
