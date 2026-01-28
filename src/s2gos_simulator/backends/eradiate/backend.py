@@ -25,6 +25,7 @@ from ...config import (
     PlatformType,
     SimulationConfig,
 )
+from ...processors.sensor_processor import SensorProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +73,7 @@ class EradiateBackend(SimulationBackend):
             simulation_config, self.geometry_utils, backend=self
         )
         self.result_processor = ResultProcessor(simulation_config)
+        self.sensor_processor = SensorProcessor(simulation_config)
 
         self._current_scene_dir = None
         self._current_scene_description = None
@@ -271,33 +273,53 @@ class EradiateBackend(SimulationBackend):
         Returns:
             Simulation results dataset
         """
+        from s2gos_utils.io.paths import mkdir
+
         experiment = self._create_experiment(
             scene_description, scene_dir, include_irradiance_measures
         )
+
+        all_saved_results = {}
 
         for i in range(len(experiment.measures)):
             measure_id = getattr(experiment.measures[i], "id", f"measure_{i}")
             print(f"  Measure {i + 1}/{len(experiment.measures)}: {measure_id}")
             eradiate.run(experiment, measures=i)
 
+            raw_dataset = experiment.results[measure_id]
+            raw_dataset.attrs["output_dir"] = str(output_dir)
+
+            sensor_config = self.sensor_translator.get_sensor_by_id(measure_id)
+            if sensor_config:
+                post_processed_dataset = self.sensor_processor.process_sensor_result(
+                    raw_dataset, sensor_config
+                )
+
+                if post_processed_dataset is not raw_dataset:
+                    self.result_processor.save_result(
+                        f"{measure_id}_raw_eradiate", raw_dataset, output_dir
+                    )
+
+                success = self.result_processor.save_result(
+                    measure_id, post_processed_dataset, output_dir
+                )
+                if success:
+                    all_saved_results[measure_id] = post_processed_dataset
+            else:
+                success = self.result_processor.save_result(
+                    measure_id, raw_dataset, output_dir
+                )
+                if success:
+                    all_saved_results[measure_id] = raw_dataset
+
         if kwargs.get("plot_image", False):
             self.result_processor.create_rgb_visualization(
                 experiment, output_dir, kwargs.get("id_to_plot", "rgb_camera")
             )
 
-        logger.debug(f"Experiment results: {list(experiment.results.keys())}")
-        raw_sensors = experiment.results
+        logger.debug(f"Successfully saved results: {list(all_saved_results.keys())}")
 
-        for sensor_id, raw_dataset in raw_sensors.items():
-            raw_dataset.attrs["output_dir"] = str(output_dir)
-
-        post_processed = self.sensor_translator.apply_post_processing_to_sensors(
-            raw_sensors
-        )
-        all_results = raw_sensors | post_processed
-        logger.debug(f"All results: {list(all_results.keys())}")
-
-        return self.result_processor.process_results(all_results, output_dir)
+        return all_saved_results
 
     def _run_combined_workflow(
         self,
@@ -335,23 +357,25 @@ class EradiateBackend(SimulationBackend):
 
         combined_results = {**sensor_results, **irr_results}
 
+        print("\n[3/3] Computing and saving derived measurements...")
         derived_results = self.sensor_translator.compute_derived_measurements(
             combined_results
         )
         derived_output_dir = output_dir / "derived_results"
+        from s2gos_utils.io.paths import mkdir
+
+        mkdir(derived_output_dir)
+
         for derived_name, dataset in derived_results.items():
-            derived_output = (
-                derived_output_dir
-                / f"{self.simulation_config.name}_{derived_name}.zarr"
-            )
-
             dataset.attrs["id"] = derived_name
-
-            dataset.to_zarr(derived_output, mode="w")
-            print(f"Derived measure '{derived_name}' saved to {derived_output}")
+            success = self.result_processor.save_result(
+                derived_name, dataset, derived_output_dir, result_type="derived"
+            )
+            if not success:
+                print(f"  ✗ Failed to save derived measure '{derived_name}'")
+                logger.warning(f"Failed to save derived measure '{derived_name}'")
 
         postprocessed_results = {**combined_results, **derived_results}
-        print(postprocessed_results.keys())
         print(
             f"\n✓ Combined workflow complete: {len(postprocessed_results)} total datasets"
         )

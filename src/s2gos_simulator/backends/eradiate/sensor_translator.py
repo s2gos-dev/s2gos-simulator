@@ -792,40 +792,6 @@ class SensorTranslator:
                 return sensor
         return None
 
-    def apply_post_processing_to_sensors(
-        self, sensor_results: Dict[str, xr.Dataset]
-    ) -> Dict[str, xr.Dataset]:
-        """Apply post-processing to sensor results.
-
-        Args:
-            sensor_results: Dictionary of sensor results
-
-        Returns:
-            Dictionary of post-processed results
-        """
-        from ...processors.sensor_processor import SensorProcessor
-
-        sensor_processor = SensorProcessor(self.simulation_config)
-        processed_results = {}
-
-        for sensor_id, dataset in sensor_results.items():
-            logger.debug(f"Processing sensor: {sensor_id}")
-            sensor = self.get_sensor_by_id(sensor_id)
-            if sensor:
-                logger.debug(f"Found sensor config: {sensor_id}")
-                post_processed_dataset = sensor_processor.process_sensor_result(
-                    dataset, sensor
-                )
-                # Only save raw version if post-processing changed the data
-                if post_processed_dataset is not dataset:
-                    logger.debug(f"Post-processing applied: {sensor_id}")
-                    processed_results[f"{sensor_id}_raw_eradiate"] = dataset
-                processed_results[sensor_id] = post_processed_dataset
-            else:
-                logger.debug(f"No sensor config found: {sensor_id}, passing through")
-                processed_results[sensor_id] = dataset
-        return processed_results
-
     def compute_derived_measurements(
         self, sensor_results: Dict[str, xr.Dataset]
     ) -> Dict[str, xr.Dataset]:

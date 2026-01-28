@@ -1,5 +1,6 @@
 """Result processing and visualization for Eradiate backend."""
 
+import logging
 from typing import Any, Dict, List, Union
 
 import numpy as np
@@ -9,6 +10,8 @@ from s2gos_utils.io.paths import mkdir, open_file
 from upath import UPath
 
 from .constants import RGB_WAVELENGTHS_NM
+
+logger = logging.getLogger(__name__)
 
 try:
     from eradiate.xarray.interp import dataarray_to_rgb
@@ -29,49 +32,45 @@ class ResultProcessor:
         """
         self.simulation_config = simulation_config
 
-    def process_results(self, results, output_dir: UPath) -> xr.Dataset:
-        """Process and save simulation results.
+    def save_result(
+        self,
+        sensor_id: str,
+        dataset: xr.Dataset,
+        output_dir: UPath,
+        result_type: str = "sensor",
+    ) -> bool:
+        """Save a sensor or measurement result.
 
         Args:
-            experiment: Eradiate experiment with results
-            output_dir: Directory for saving results
+            sensor_id: Unique identifier for this result
+            dataset: xarray Dataset to save
+            output_dir: Output directory
+            result_type: Type of result ("sensor", "irradiance", "derived")
 
         Returns:
-            Results dataset (dictionary or single dataset)
-
-        Raises:
-            ValueError: If no results found in experiment
+            True if save succeeded, False otherwise
         """
+        try:
+            output_dir = UPath(output_dir)
+            mkdir(output_dir)
+            sensor_output = output_dir / f"{self.simulation_config.name}_{sensor_id}.zarr"
 
-        if not results:
-            raise ValueError("No results found in experiment")
+            metadata = self.create_output_metadata(output_dir)
+            dataset.attrs.update(metadata)
+            dataset.attrs["sensor_id"] = sensor_id
+            dataset.attrs["result_type"] = result_type
 
-        output_dir = UPath(output_dir)
-        mkdir(output_dir)
+            dataset.to_zarr(sensor_output, mode="w")
+            print(f"  ✓ Saved '{sensor_id}' → {sensor_output.name}")
 
-        metadata = self.create_output_metadata(output_dir)
+            return True
 
-        if isinstance(results, dict):
-            print(f"Processing {len(results)} measure results...")
-            for sensor_id, dataset in results.items():
-                sensor_output = (
-                    output_dir / f"{self.simulation_config.name}_{sensor_id}.zarr"
-                )
-
-                dataset.attrs.update(metadata)
-                dataset.attrs["sensor_id"] = sensor_id
-
-                dataset.to_zarr(sensor_output, mode="w")
-                print(f"Measure '{sensor_id}' saved to {sensor_output}")
-
-        else:
-            results_ds = results
-            single_output = output_dir / f"{self.simulation_config.name}_results.zarr"
-            results_ds.attrs.update(metadata)
-            results_ds.to_zarr(single_output, mode="w")
-            print(f"Results saved to {single_output}")
-
-        return results
+        except Exception as e:
+            print(f"  ✗ Failed to save '{sensor_id}': {e}")
+            logger.error(
+                f"Failed to save sensor result '{sensor_id}': {e}", exc_info=True
+            )
+            return False
 
     def create_output_metadata(self, output_dir: UPath) -> Dict[str, Any]:
         """Create standardized metadata for output files.
