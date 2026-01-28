@@ -6,7 +6,7 @@ from typing import Annotated, Any, Dict, List, Literal, Optional, Tuple, Union
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 from s2gos_utils import validate_config_version
-from s2gos_utils.io.paths import open_file, read_json
+from s2gos_utils.io.paths import PathRef, open_file, read_json
 from s2gos_utils.io.resolver import resolver
 from s2gos_utils.typing import PathLike
 from skyfield.api import load, wgs84
@@ -1299,7 +1299,7 @@ class HypstarPostProcessingConfig(SRFPostProcessingConfig):
         default=10.0, gt=0.0, description="HYPSTAR SWIR FWHM (default 10.0 nm)"
     )
 
-    real_reference_file: Optional[str] = Field(
+    real_reference_file: Optional[PathRef] = Field(
         default=None,
         description=(
             "Path to HYPSTAR reference NetCDF file for wavelength grid reference. "
@@ -1342,6 +1342,15 @@ class HypstarPostProcessingConfig(SRFPostProcessingConfig):
         gt=0.0,
         description="Brightness multiplier for RGB visualization",
     )
+
+    @field_validator("real_reference_file", mode="before")
+    @classmethod
+    def validate_real_reference_file(cls, v):
+        """Validate and resolve real reference."""
+        if v is None:
+            return None
+        resolved = PathRef(resolver.resolve(v, strict=True), cid=v.cid)
+        return resolved
 
 
 class GroundInstrumentType(str, Enum):

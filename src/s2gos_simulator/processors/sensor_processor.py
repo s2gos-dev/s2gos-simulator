@@ -2,6 +2,7 @@ from typing import Optional
 
 import numpy as np
 import xarray as xr
+from s2gos_utils.io.paths import open_dataset
 
 
 class SensorProcessor:
@@ -274,7 +275,7 @@ class SensorProcessor:
                     logger.info(
                         f"Loading HYPSTAR reference: {config.real_reference_file}"
                     )
-                    real_reference_ds = xr.open_dataset(config.real_reference_file)
+                    real_reference_ds = open_dataset(config.real_reference_file)
                     target_wavelengths = real_reference_ds[config.wavelength_variable]
                     logger.info(
                         f"Loaded {len(target_wavelengths)} wavelengths "
