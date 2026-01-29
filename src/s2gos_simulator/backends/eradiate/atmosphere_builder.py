@@ -247,3 +247,32 @@ class AtmosphereBuilder:
         )
 
         return atmosphere
+
+    def create_simple_mono_atmosphere(self):
+        """Create simple molecular atmosphere for mono mode debugging.
+
+        Uses US Standard atmosphere with GECKO absorption database.
+        Suitable for fast RGB sanity checks in mono mode.
+
+        Returns:
+            MolecularAtmosphere object
+        """
+        # Simple US Standard atmosphere
+        altitude_min = 0.0
+        altitude_max = 120000.0
+        altitude_step = 1000.0
+        num_steps = int((altitude_max - altitude_min) / altitude_step) + 1
+
+        thermoprops = {
+            "identifier": "afgl_1986-us_standard",
+            "z": np.linspace(altitude_min, altitude_max, num_steps) * ureg.m,
+        }
+
+        atmosphere = MolecularAtmosphere(
+            thermoprops=thermoprops,
+            absorption_data="gecko",
+            has_absorption=True,
+            has_scattering=True,
+        )
+
+        return atmosphere

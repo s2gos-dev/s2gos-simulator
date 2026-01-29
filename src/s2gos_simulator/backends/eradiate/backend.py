@@ -273,7 +273,6 @@ class EradiateBackend(SimulationBackend):
         Returns:
             Simulation results dataset
         """
-        from s2gos_utils.io.paths import mkdir
 
         experiment = self._create_experiment(
             scene_description, scene_dir, include_irradiance_measures
@@ -442,9 +441,17 @@ class EradiateBackend(SimulationBackend):
 
         self.surface_builder.add_scene_objects(kdict, scene_description, scene_dir)
 
-        atmosphere = self.atmosphere_builder.create_atmosphere_from_config(
-            scene_description
-        )
+        # TODO: This needs to be more fleshed out and tested
+        # Use simple atmosphere for mono mode (debugging), otherwise use scene atmosphere
+        if self._eradiate_mode == "mono":
+            print(
+                "  Using simple mono atmosphere (GECKO + US Standard) for fast debugging"
+            )
+            atmosphere = self.atmosphere_builder.create_simple_mono_atmosphere()
+        else:
+            atmosphere = self.atmosphere_builder.create_atmosphere_from_config(
+                scene_description
+            )
 
         illumination = self.sensor_translator.translate_illumination()
 
@@ -453,9 +460,16 @@ class EradiateBackend(SimulationBackend):
         )
 
         print(f"{measures =}")
-        geometry = self.atmosphere_builder.create_geometry_from_atmosphere(
-            scene_description
-        )
+        # For mono mode with simple atmosphere, use fixed TOA
+        if self._eradiate_mode == "mono":
+            geometry = {
+                "type": "plane_parallel",
+                "toa_altitude": 120000.0,
+            }
+        else:
+            geometry = self.atmosphere_builder.create_geometry_from_atmosphere(
+                scene_description
+            )
 
         self.surface_builder.validate_material_ids(kdict, scene_description)
 
