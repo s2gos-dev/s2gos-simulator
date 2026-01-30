@@ -5,13 +5,15 @@ import xarray as xr
 from s2gos_utils.scene import SceneDescription
 from upath import UPath
 
+from .backends.eradiate.reflectance_computation import compute_reflectance_factor
+from .config import HCRFConfig, HDRFConfig
 from .irradiance_processor import IrradianceProcessor
 
 logger = logging.getLogger(__name__)
 
 
 class HDRFProcessor:
-    """Processor for HDRF measurements: HDRF = L_actual / L_reference."""
+    """Processor for HDRF and HCRF measurements"""
 
     def __init__(self, backend):
         self.backend = backend
@@ -62,7 +64,7 @@ class HDRFProcessor:
         return [x.replace(".", "_") for x in hdrf_ids]
 
     def _get_hdrf_id(self, measurement) -> str:
-        """Generate ID for an HDRF measurement.
+        """Get ID for an HDRF measurement.
 
         Args:
             measurement: HDRFConfig instance
@@ -70,11 +72,7 @@ class HDRFProcessor:
         Returns:
             ID string for the measurement
         """
-        if measurement.id:
-            return measurement.id
-
-        # Auto-generate ID from instrument type
-        return f"hdrf_{measurement.instrument}"
+        return measurement.id
 
     def _get_hdrf_config_for_measure(
         self, measure_id: str
@@ -150,140 +148,94 @@ class HDRFProcessor:
             disk_id="white_reference_disk_hdrf",
         )
 
-    def compute_hdrf_from_radiance_and_irradiance(
+    def compute_h_reflectances(
         self,
-        radiance_results: Dict[str, xr.Dataset],
-        irradiance_results: Dict[str, xr.Dataset],
+        raw_results: Dict[str, xr.Dataset],
         output_dir: UPath,
     ) -> Dict[str, xr.Dataset]:
-        """Compute HDRF = (π × L_actual) / E_reference.
-
-        This is the CORRECT approach: use measured radiance and irradiance.
-        NO dual simulation needed - that duplicates irradiance measurement!
+        """Compute derived measurements (HDRF, HCRF) using shared computation logic.
 
         Args:
-            radiance_results: Actual scene radiance measurements (L_actual)
-            irradiance_results: Irradiance measurements (E_reference)
-            output_dir: Output directory for HDRF results
+            raw_results: Dictionary containing all raw sensor and irradiance results.
+            output_dir: Directory to save results.
 
         Returns:
-            Dictionary of HDRF datasets by measure ID
+            Dictionary of derived datasets keyed by the original measurement ID.
         """
-        import numpy as np
         from s2gos_utils.io.paths import mkdir
 
-        from .config import HDRFConfig
-
-        logger.info("=" * 60)
-        logger.info("HDRF Computation from Radiance + Irradiance")
-        logger.info("=" * 60)
-
         mkdir(output_dir)
-        hdrf_datasets = {}
 
-        # Get HDRF configs
-        hdrf_configs = [
-            m for m in self.simulation_config.measurements if isinstance(m, HDRFConfig)
+        derived_results = {}
+
+        # Identify all measurements that are derived types (HDRF or HCRF)
+        derived_configs = [
+            m
+            for m in self.simulation_config.measurements
+            if isinstance(m, (HDRFConfig, HCRFConfig))
         ]
 
-        for hdrf_config in hdrf_configs:
-            hdrf_id = (
-                hdrf_config.id
-                or f"hdrf_{hdrf_config.viewing_zenith}_{hdrf_config.viewing_azimuth}"
-            )
-            ref_id = hdrf_config.irradiance_measurement_id
+        logger.info(
+            f"Computing derived measurements for {len(derived_configs)} items..."
+        )
 
-            logger.info(f"\n[{hdrf_id}]")
-            logger.info(f"  Using reference: {ref_id}")
+        for config in derived_configs:
+            meas_id = config.id
+            rad_id = getattr(config, "radiance_sensor_id", None)
+            irr_id = getattr(config, "irradiance_measurement_id", None)
 
-            # Get radiance from actual scene
-            if hdrf_id not in radiance_results:
-                logger.warning(f"  Skipping: no radiance results for {hdrf_id}")
+            if isinstance(config, HDRFConfig):
+                ref_type = "hdrf"
+            elif isinstance(config, HCRFConfig):
+                ref_type = "hcrf"
+            else:
                 continue
 
-            radiance_ds = radiance_results[hdrf_id]
-            if "radiance" not in radiance_ds:
-                logger.warning(f"  Skipping: no radiance variable in {hdrf_id}")
+            if not rad_id or not irr_id:
+                logger.warning(f"Skipping '{meas_id}': Missing linked sensor IDs.")
                 continue
 
-            L_actual = radiance_ds["radiance"]
-
-            # Get irradiance from reference measurement
-            if ref_id not in irradiance_results:
-                logger.error(f"  ERROR: Reference irradiance '{ref_id}' not found!")
-                logger.error(f"  Available: {list(irradiance_results.keys())}")
-                continue
-
-            irradiance_ds = irradiance_results[ref_id]
-            if "boa_irradiance" not in irradiance_ds:
-                logger.warning(f"  Skipping: no boa_irradiance in {ref_id}")
-                continue
-
-            E_reference = irradiance_ds["boa_irradiance"]
-
-            # DIAGNOSTIC logging before HDRF calculation
-            logger.info(f"=== HDRF DIAGNOSTIC: {hdrf_id} ===")
-            logger.info(f"  L_actual dims: {L_actual.dims}, shape: {L_actual.shape}")
-            logger.info(
-                f"  L_actual: mean={float(L_actual.mean()):.6e}, "
-                f"range=[{float(L_actual.min()):.6e}, {float(L_actual.max()):.6e}]"
-            )
-            logger.info(
-                f"  E_reference dims: {E_reference.dims}, shape: {E_reference.shape}"
-            )
-            logger.info(
-                f"  E_reference: mean={float(E_reference.mean()):.6e}, "
-                f"range=[{float(E_reference.min()):.6e}, {float(E_reference.max()):.6e}]"
-            )
-
-            if "w" in L_actual.dims and "w" in E_reference.dims:
-                logger.info(
-                    f"  L_actual wavelengths: {len(L_actual.w)} points, "
-                    f"range=[{float(L_actual.w.min()):.1f}, {float(L_actual.w.max()):.1f}] nm"
+            if rad_id not in raw_results:
+                logger.warning(
+                    f"Skipping '{meas_id}': Missing radiance results '{rad_id}'."
                 )
-                logger.info(
-                    f"  E_reference wavelengths: {len(E_reference.w)} points, "
-                    f"range=[{float(E_reference.w.min()):.1f}, {float(E_reference.w.max()):.1f}] nm"
+                continue
+            if irr_id not in raw_results:
+                logger.warning(
+                    f"Skipping '{meas_id}': Missing irradiance results '{irr_id}'."
+                )
+                continue
+
+            L_ds = raw_results[rad_id]
+            E_ds = raw_results[irr_id]
+
+            L_data = L_ds.get("radiance")
+            E_data = E_ds.get("boa_irradiance")
+
+            if L_data is None or E_data is None:
+                logger.error(f"Missing data variables in datasets for {meas_id}")
+                continue
+
+            try:
+                result_ds = compute_reflectance_factor(
+                    radiance=L_data,
+                    reference=E_data,
+                    reflectance_type=ref_type,
+                    measurement_id=meas_id,
+                    extra_attrs={
+                        "linked_radiance_id": rad_id,
+                        "linked_irradiance_id": irr_id,
+                    },
                 )
 
-            # Compute HDRF = (π × L_actual) / E_reference
-            logger.info("  Computing: HDRF = (π × L_actual) / E_reference")
-            hdrf = (np.pi * L_actual) / E_reference
+                output_file = output_dir / f"{meas_id}_{ref_type}.zarr"
+                result_ds.to_zarr(output_file, mode="w")
+                derived_results[meas_id] = result_ds
 
-            logger.info(
-                f"  HDRF result: mean={float(hdrf.mean()):.4f}, "
-                f"range=[{float(hdrf.min()):.4f}, {float(hdrf.max()):.4f}]"
-            )
-            logger.info("  Expected: HDRF typically 0.0-1.0 for natural surfaces")
+                logger.info(f"Computed {ref_type.upper()} for '{meas_id}'")
 
-            # Create dataset
-            hdrf_dataset = xr.Dataset(
-                {
-                    "hdrf": hdrf,
-                    "radiance_actual": L_actual,
-                    "irradiance_reference": E_reference,
-                },
-                coords=hdrf.coords,
-            )
+            except Exception as e:
+                logger.error(f"Failed to compute {ref_type} for '{meas_id}': {e}")
+                continue
 
-            hdrf_dataset.attrs.update(
-                {
-                    "quantity": "hdrf",
-                    "units": "dimensionless",
-                    "method": "radiance_irradiance_ratio",
-                    "reference_irradiance_id": ref_id,
-                }
-            )
-
-            hdrf_datasets[hdrf_id] = hdrf_dataset
-
-            # Save
-            output_file = output_dir / f"{hdrf_id}_hdrf.zarr"
-            hdrf_dataset.to_zarr(output_file, mode="w")
-            logger.info(f"  ✓ Saved: {output_file.name}")
-
-        logger.info(f"\n{'=' * 60}")
-        logger.info(f"Complete: {len(hdrf_datasets)} HDRF measurements")
-        logger.info(f"{'=' * 60}\n")
-
-        return hdrf_datasets
+        return derived_results

@@ -2,7 +2,6 @@
 
 Measures downward irradiance at BOA by:
 1. Placing a small reference disk with Lambertian reflectance (ρ=1.0) at target location
-2. Running simulation with hemispherical distant sensor
 3. Converting measured radiance to irradiance: E = π × L_mean
 """
 
@@ -114,7 +113,7 @@ class IrradianceProcessor:
                 scene_description, scene_dir, target_lat, target_lon, height_offset_m
             )
         else:
-            x, y, z = location.target_x, location.target_y, location.target_z
+            x, y = location.target_x, location.target_y
             target_lat, target_lon = self._to_lat_lon_coords(x, y, scene_description)
 
             if location.terrain_relative_height:
@@ -125,6 +124,8 @@ class IrradianceProcessor:
                     target_lon,
                     location.height_offset_m,
                 )
+            else:
+                z = location.target_z
 
         # Create disk object
         reference_disk = {
@@ -174,7 +175,6 @@ class IrradianceProcessor:
         scene_dir: UPath,
         output_dir: UPath,
     ) -> Dict[str, xr.Dataset]:
-        """Execute BOA irradiance measurements: disk scene → simulation → E = π × L."""
         import eradiate
         from s2gos_utils.io.paths import mkdir
 
@@ -197,10 +197,9 @@ class IrradianceProcessor:
             if isinstance(m, IrradianceConfig)
         ]
 
+        disk_scenes = {}
         for config in irradiance_configs:
-            logger.info(f"\n[{config.id}]")
-            logger.debug(f"Processing config: {config.id}")
-
+            logger.info(f"\n[{config.id}] Creating reference disk...")
             disk_scene, disk_coords = self.create_reference_disk_scene(
                 scene_description,
                 scene_dir,
@@ -209,11 +208,13 @@ class IrradianceProcessor:
                 disk_id=f"disk_{config.id}",
             )
             self.backend.irradiance_disk_coords[config.id] = disk_coords
+            disk_scenes[config.id] = disk_scene
 
-            # Run simulation
+        for config in irradiance_configs:
+            disk_scene = disk_scenes[config.id]
+
             experiment = self.backend._create_experiment(disk_scene, scene_dir)
 
-            # Build measure ID → index mapping for efficient lookup
             measure_map = {
                 getattr(m, "id", f"measure_{i}"): i
                 for i, m in enumerate(experiment.measures)
@@ -248,7 +249,6 @@ class IrradianceProcessor:
 
             result_ds = xr.Dataset(dataset_vars)
 
-            # Save
             output_file = output_dir / f"{config.id}.zarr"
             result_ds.to_zarr(output_file, mode="w")
             logger.info(f"  ✓ Saved {output_file.name}")

@@ -4,6 +4,7 @@
 # Import backends with optional dependencies
 from .backends import ERADIATE_AVAILABLE, EradiateSimulator
 from .backends.eradiate.backend import EradiateBackend
+from .bhr_processor import BHRProcessor
 from .config import (
     CHIME_SPECTRAL_CONFIG,
     CHIME_SPECTRAL_REGIONS,
@@ -13,6 +14,7 @@ from .config import (
     BRFConfig,
     ConstantIllumination,
     DirectionalIllumination,
+    DistantViewing,
     GroundInstrumentType,
     GroundSensor,
     HCRFConfig,
@@ -22,8 +24,12 @@ from .config import (
     HemisphericalViewing,
     IrradianceConfig,
     LookAtViewing,
+    PixelBHRConfig,
+    PixelBRFConfig,
+    PixelHDRFConfig,
     PlatformType,
     RadianceConfig,
+    RectangleTarget,
     SatelliteSensor,
     SimulationConfig,
     SpectralRegion,
@@ -64,13 +70,22 @@ __all__ = [
     "BRFConfig",
     "RadianceConfig",
     "BHRConfig",
+    "PixelBHRConfig",
+    "PixelBRFConfig",
+    "PixelHDRFConfig",
     # CHIME Hyperspectral Support
     "CHIME_SPECTRAL_REGIONS",
     "CHIME_SPECTRAL_CONFIG",
+    "SpectralRegion",
+    "WavelengthGrid",
     "create_chime_sensor",
+    # Viewing and Target Types
+    "DistantViewing",
+    "RectangleTarget",
     # Backends and Processors
     "EradiateSimulator",
     "EradiateBackend",
     "ERADIATE_AVAILABLE",
+    "BHRProcessor",
     "HDRFProcessor",
 ]

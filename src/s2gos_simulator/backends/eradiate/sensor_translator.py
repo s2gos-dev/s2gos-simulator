@@ -1,11 +1,11 @@
 """Sensor and measurement translation for Eradiate backend.
 
 This module handles translation of generic sensor configurations to Eradiate-specific
-measure definitions, including post-processing and derived measurement computation.
+measure definitions.
 """
 
 import logging
-from typing import Any, Dict, List, NamedTuple, Tuple, Union
+from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple, Union
 
 import numpy as np
 import xarray as xr
@@ -16,8 +16,11 @@ from upath import UPath
 from .geometry_utils import apply_asset_relative_transform, sanitize_sensor_id
 from ...config import (
     AngularFromOriginViewing,
+    BHRConfig,
+    BRFConfig,
     ConstantIllumination,
     DirectionalIllumination,
+    DistantViewing,
     GroundInstrumentType,
     GroundSensor,
     HCRFConfig,
@@ -25,6 +28,7 @@ from ...config import (
     HemisphericalViewing,
     IrradianceConfig,
     LookAtViewing,
+    RectangleTarget,
     SatelliteSensor,
     UAVInstrumentType,
     UAVSensor,
@@ -210,6 +214,7 @@ class SensorTranslator:
         scene_description: SceneDescription,
         scene_dir: UPath,
         include_irradiance_measures: bool = True,
+        sensor_ids: Optional[Set[str]] = None,
     ) -> List[Dict[str, Any]]:
         """Translate generic sensors and measurements to Eradiate measures.
 
@@ -217,6 +222,9 @@ class SensorTranslator:
             scene_description: Scene description with metadata
             scene_dir: Scene directory path
             include_irradiance_measures: Whether to include irradiance measurements
+            sensor_ids: Optional set of sensor IDs to include. If None, all sensors
+                are included. Use this to filter sensors for specific workflows
+                (e.g., only BRF sensors for BRF workflow).
 
         Returns:
             List of Eradiate measure dictionaries
@@ -229,6 +237,8 @@ class SensorTranslator:
         measures = []
 
         for sensor in self.simulation_config.sensors:
+            if sensor_ids is not None and sensor.id not in sensor_ids:
+                continue
             if isinstance(sensor, SatelliteSensor):
                 measures.append(
                     self.translate_satellite_sensor(sensor, scene_description)
@@ -272,7 +282,9 @@ class SensorTranslator:
                     measures.append(
                         self.create_irradiance_measure(measurement, disk_coords)
                     )
-                elif isinstance(measurement, (HDRFConfig, HCRFConfig)):
+                elif isinstance(
+                    measurement, (HDRFConfig, HCRFConfig, BRFConfig, BHRConfig)
+                ):
                     continue  # Handled in derived measurements
                 else:
                     raise ValueError(
@@ -428,6 +440,16 @@ class SensorTranslator:
         """
         view = sensor.viewing
 
+        if isinstance(view, DistantViewing):
+            return self.translate_distant_viewing_to_mdistant(
+                viewing=view,
+                sensor_id=sensor.id,
+                srf=sensor.srf,
+                spp=sensor.samples_per_pixel,
+                scene_description=scene_description,
+                scene_dir=scene_dir,
+            )
+
         # Handle HYPSTAR special case with post-processing
         if (
             sensor.instrument == GroundInstrumentType.HYPSTAR
@@ -540,6 +562,93 @@ class SensorTranslator:
 
         return base_measure
 
+    def translate_distant_viewing_to_mdistant(
+        self,
+        viewing: DistantViewing,
+        sensor_id: str,
+        srf: Any,
+        spp: int,
+        scene_description: SceneDescription,
+        scene_dir: UPath,
+    ) -> Dict[str, Any]:
+        """Translate DistantViewing to Eradiate mdistant measure.
+
+        Uses Eradiate's MultiDistantMeasure which measures radiance from
+        a distant sensor looking at a target area. Used for pixel-level
+        measurements with rectangular targets.
+
+        Args:
+            viewing: DistantViewing configuration
+            sensor_id: Unique sensor identifier
+            srf: Spectral response function
+            spp: Samples per pixel
+            scene_description: Scene description for terrain lookup
+            scene_dir: Scene directory for terrain data
+
+        Returns:
+            Eradiate mdistant measure dictionary
+        """
+        measure = {
+            "type": "mdistant",
+            "id": sanitize_sensor_id(sensor_id),
+            "srf": self.translate_srf(srf),
+            "spp": spp,
+        }
+
+        # Convert direction vector to angles
+        # Direction [0, 0, 1] means looking down (nadir) -> zenith=0
+        dx, dy, dz = viewing.direction or [0, 0, 1]
+        horiz = np.sqrt(dx**2 + dy**2)
+        zenith = np.degrees(np.arctan2(horiz, dz))
+        azimuth = np.degrees(np.arctan2(dy, dx)) % 360 if horiz > 1e-10 else 0.0
+
+        measure["construct"] = "from_angles"
+        measure["angles"] = [zenith, azimuth]
+
+        # Handle target specification
+        target = viewing.target
+        if target is None:
+            # Default to point target at scene center
+            measure["target"] = [0.0, 0.0, 0.0]
+        elif isinstance(target, RectangleTarget):
+            # Rectangle target for pixel BRF measurements
+            measure["target"] = {
+                "type": "rectangle",
+                "xmin": target.xmin,
+                "xmax": target.xmax,
+                "ymin": target.ymin,
+                "ymax": target.ymax,
+                "z": target.z,
+            }
+            logger.debug(
+                f"DistantViewing sensor '{sensor_id}' using rectangle target: "
+                f"x=[{target.xmin:.1f}, {target.xmax:.1f}], "
+                f"y=[{target.ymin:.1f}, {target.ymax:.1f}], z={target.z:.1f}"
+            )
+        elif isinstance(target, list) and len(target) == 3:
+            # Point target - adjust for terrain if needed
+            x, y, z = target
+            if viewing.terrain_relative_height:
+                terrain_z = self.geometry_utils.query_terrain_elevation(
+                    scene_description, scene_dir, x, y
+                )
+                z = terrain_z + z
+            measure["target"] = [x, y, z]
+            logger.debug(
+                f"DistantViewing sensor '{sensor_id}' using point target: [{x:.1f}, {y:.1f}, {z:.1f}]"
+            )
+        else:
+            raise ValueError(
+                f"Invalid target specification for DistantViewing: {target}. "
+                f"Expected None, [x, y, z], or RectangleTarget."
+            )
+
+        # Optional ray offset
+        if viewing.ray_offset is not None:
+            measure["ray_offset"] = viewing.ray_offset
+
+        return measure
+
     def create_irradiance_measure(
         self, irradiance_config, disk_coords: Tuple[float, float, float]
     ) -> Dict[str, Any]:
@@ -582,38 +691,55 @@ class SensorTranslator:
             "spp": spp,
         }
 
-    def create_brf_measure(self, brf_config) -> Dict[str, Any]:
-        """Create BOA distant measure for BRF computation.
+    def create_distant_flux_measure(
+        self,
+        bhr_config: BHRConfig,
+        target_coords: Tuple[float, float, float],
+        is_reference: bool = False,
+    ) -> Dict[str, Any]:
+        """Create distant_flux measure for BHR measurement.
+
+        The distant_flux measure computes radiosity (power per unit area)
+        by integrating over all directions in a hemisphere. This is used
+        for BHR computation which requires radiosity ratios.
 
         Args:
-            brf_config: BRFConfig object
+            bhr_config: BHR configuration
+            target_coords: Target coordinates (x, y, z) in scene coordinate system
+            is_reference: If True, this is for the white reference simulation
 
         Returns:
-            Eradiate measure dictionary
+            Eradiate distant_flux measure dictionary
         """
-        raise NotImplementedError("BRF measurements not yet implemented")
+        # Create unique measure ID based on whether this is surface or reference
+        if is_reference:
+            measure_id = f"bhr_reference_{bhr_config.id}"
+        else:
+            measure_id = f"bhr_surface_{bhr_config.id}"
 
-    def create_radiance_measure(self, radiance_config) -> Dict[str, Any]:
-        """Create BOA radiance measure.
+        x, y, z = target_coords
 
-        Args:
-            radiance_config: RadianceConfig object
+        srf = self.translate_srf(bhr_config.srf)
+        spp = bhr_config.samples_per_pixel
 
-        Returns:
-            Eradiate measure dictionary
-        """
-        raise NotImplementedError("Direct radiance measurements handled via sensors")
+        logger.debug(
+            f"Creating distant_flux measure '{measure_id}' at target "
+            f"({x:.2f}, {y:.2f}, {z:.2f}) m, spp={spp}"
+        )
 
-    def create_bhr_measure(self, bhr_config) -> Dict[str, Any]:
-        """Create hemispherical measure for BHR computation.
-
-        Args:
-            bhr_config: BHRConfig object
-
-        Returns:
-            Eradiate measure dictionary
-        """
-        raise NotImplementedError("BHR measurements not yet implemented")
+        return {
+            "type": "distant_flux",
+            "id": sanitize_sensor_id(measure_id),
+            "target": [x, y, z],
+            "direction": [
+                0,
+                0,
+                1,
+            ],  # Upward-looking (measures downward flux onto surface)
+            "ray_offset": 1.0,
+            "srf": srf,
+            "spp": spp,
+        }
 
     def translate_srf(self, srf) -> Union[Dict[str, Any], str]:
         """Translate generic SRF to Eradiate format.
@@ -778,6 +904,25 @@ class SensorTranslator:
             location=location_with_srf,
         )
 
+    def generate_radiance_sensor_for_brf(self, brf_config: BRFConfig) -> GroundSensor:
+        """Generate radiance sensor for BRF measurement (no atmosphere).
+
+        Args:
+            brf_config: BRF configuration
+
+        Returns:
+            Generated GroundSensor for radiance measurement
+        """
+        sensor_id = f"brf_radiance_{brf_config.id}"
+
+        return GroundSensor(
+            id=sensor_id,
+            instrument=GroundInstrumentType.RADIANCEMETER,
+            viewing=brf_config.viewing,
+            srf=brf_config.srf,
+            samples_per_pixel=brf_config.samples_per_pixel or 512,
+        )
+
     def get_sensor_by_id(self, sensor_id: str):
         """Find sensor config by ID.
 
@@ -792,133 +937,36 @@ class SensorTranslator:
                 return sensor
         return None
 
-    def compute_derived_measurements(
+    def apply_post_processing_to_sensors(
         self, sensor_results: Dict[str, xr.Dataset]
     ) -> Dict[str, xr.Dataset]:
-        """Compute derived measurements (HDRF, HCRF) from sensor results.
+        """Apply post-processing to sensor results.
 
         Args:
-            sensor_results: Dictionary of sensor and measurement results
+            sensor_results: Dictionary of sensor results
 
         Returns:
-            Dictionary of derived measurement datasets
+            Dictionary of post-processed results
         """
-        derived = {}
+        from ...processors.sensor_processor import SensorProcessor
 
-        for measurement in self.simulation_config.measurements:
-            if isinstance(measurement, HDRFConfig):
-                if (
-                    measurement.radiance_sensor_id
-                    and measurement.irradiance_measurement_id
-                ):
-                    radiance_ds = sensor_results.get(measurement.radiance_sensor_id)
-                    irradiance_ds = sensor_results.get(
-                        measurement.irradiance_measurement_id
-                    )
+        sensor_processor = SensorProcessor(self.simulation_config)
+        processed_results = {}
 
-                    if radiance_ds is not None and irradiance_ds is not None:
-                        hdrf_ds = self.compute_hdrf(
-                            radiance_ds, irradiance_ds, measurement
-                        )
-                        derived[measurement.id] = hdrf_ds
-
-            elif isinstance(measurement, HCRFConfig):
-                if (
-                    measurement.radiance_sensor_id
-                    and measurement.irradiance_measurement_id
-                ):
-                    radiance_ds = sensor_results.get(measurement.radiance_sensor_id)
-                    irradiance_ds = sensor_results.get(
-                        measurement.irradiance_measurement_id
-                    )
-
-                    if radiance_ds is not None and irradiance_ds is not None:
-                        hcrf_ds = self.compute_hcrf(
-                            radiance_ds, irradiance_ds, measurement
-                        )
-                        derived[measurement.id] = hcrf_ds
-
-        return derived
-
-    def compute_hdrf(
-        self,
-        radiance_dataset: xr.Dataset,
-        irradiance_dataset: xr.Dataset,
-        hdrf_config: HDRFConfig,
-    ) -> xr.Dataset:
-        """Compute HDRF from radiance and irradiance datasets.
-
-        Args:
-            radiance_dataset: Radiance dataset
-            irradiance_dataset: Irradiance dataset
-            hdrf_config: HDRF configuration
-
-        Returns:
-            HDRF dataset
-        """
-        L_actual = radiance_dataset["radiance"]
-        E_reference = irradiance_dataset["boa_irradiance"]
-
-        # Ensure wavelength alignment
-        if "w" in L_actual.dims and "w" in E_reference.dims:
-            if not np.array_equal(L_actual.w.values, E_reference.w.values):
-                E_reference = E_reference.interp(w=L_actual.w, method="linear")
-
-        # Broadcast if needed
-        if set(L_actual.dims) - set(E_reference.dims):
-            E_reference = E_reference.broadcast_like(L_actual)
-
-        # Compute HDRF = π × L / E
-        hdrf = (np.pi * L_actual) / E_reference
-
-        hdrf_ds = xr.Dataset(
-            {"hdrf": hdrf},
-            attrs={
-                "measurement_type": "hdrf",
-                "measurement_id": hdrf_config.id,
-                "units": "dimensionless",
-            },
-        )
-
-        return hdrf_ds
-
-    def compute_hcrf(
-        self,
-        radiance_dataset: xr.Dataset,
-        irradiance_dataset: xr.Dataset,
-        hcrf_config: HCRFConfig,
-    ) -> xr.Dataset:
-        """Compute HCRF from radiance and irradiance datasets.
-
-        Args:
-            radiance_dataset: Radiance dataset
-            irradiance_dataset: Irradiance dataset
-            hcrf_config: HCRF configuration
-
-        Returns:
-            HCRF dataset
-        """
-        L = radiance_dataset["radiance"]
-        E = irradiance_dataset["boa_irradiance"]
-
-        # Ensure wavelength alignment
-        if "w" in L.dims and "w" in E.dims:
-            if not np.array_equal(L.w.values, E.w.values):
-                E = E.interp(w=L.w, method="linear")
-
-        # Broadcast if needed
-        if set(L.dims) - set(E.dims):
-            E = E.broadcast_like(L)
-
-        hcrf = (np.pi * L) / E
-
-        hcrf_ds = xr.Dataset(
-            {"hcrf": hcrf},
-            attrs={
-                "measurement_type": "hcrf",
-                "measurement_id": hcrf_config.id,
-                "units": "dimensionless",
-            },
-        )
-
-        return hcrf_ds
+        for sensor_id, dataset in sensor_results.items():
+            logger.debug(f"Processing sensor: {sensor_id}")
+            sensor = self.get_sensor_by_id(sensor_id)
+            if sensor:
+                logger.debug(f"Found sensor config: {sensor_id}")
+                post_processed_dataset = sensor_processor.process_sensor_result(
+                    dataset, sensor
+                )
+                # Only save raw version if post-processing changed the data
+                if post_processed_dataset is not dataset:
+                    logger.debug(f"Post-processing applied: {sensor_id}")
+                    processed_results[f"{sensor_id}_raw_eradiate"] = dataset
+                processed_results[sensor_id] = post_processed_dataset
+            else:
+                logger.debug(f"No sensor config found: {sensor_id}, passing through")
+                processed_results[sensor_id] = dataset
+        return processed_results

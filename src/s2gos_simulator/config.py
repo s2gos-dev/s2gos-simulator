@@ -503,7 +503,7 @@ class AngularFromOriginViewing(BaseViewing):
         0.0,
         ge=0.0,
         le=180.0,
-        description="Pointing zenith angle (0=down/nadir, 90=horizon, 180=up)",
+        description="Pointing zenith angle (0=up, 90=horizon, 180=nadir)",
     )
     azimuth: float = Field(
         0.0, ge=0.0, lt=360.0, description="Pointing azimuth angle (0=East, 90=North)"
@@ -565,6 +565,104 @@ class LookAtViewing(BaseViewing):
     )
 
 
+class RectangleTarget(BaseModel):
+    """Rectangle target specification for distant measurements.
+
+    Defines an axis-aligned rectangle at a specific altitude for mdistant targets.
+    Used for pixel-level BRF measurements where we want to measure the reflectance
+    leaving a specific rectangular area.
+    """
+
+    type: Literal["rectangle"] = "rectangle"
+    xmin: float = Field(..., description="Minimum X coordinate in meters")
+    xmax: float = Field(..., description="Maximum X coordinate in meters")
+    ymin: float = Field(..., description="Minimum Y coordinate in meters")
+    ymax: float = Field(..., description="Maximum Y coordinate in meters")
+    z: float = Field(default=0.0, description="Altitude (z-coordinate) in meters")
+
+    @model_validator(mode="after")
+    def validate_bounds(self):
+        """Ensure bounds are valid (min < max)."""
+        if self.xmin >= self.xmax:
+            raise ValueError(f"xmin ({self.xmin}) must be less than xmax ({self.xmax})")
+        if self.ymin >= self.ymax:
+            raise ValueError(f"ymin ({self.ymin}) must be less than ymax ({self.ymax})")
+        return self
+
+    @classmethod
+    def from_center_and_size(
+        cls,
+        cx: float,
+        cy: float,
+        width: float,
+        height: Optional[float] = None,
+        z: float = 0.0,
+    ) -> "RectangleTarget":
+        """Create rectangle from center point, dimensions, and altitude.
+
+        Args:
+            cx: Center X coordinate in meters
+            cy: Center Y coordinate in meters
+            width: Width in meters
+            height: Height in meters (defaults to width for square)
+            z: Altitude in meters (default 0.0)
+
+        Returns:
+            RectangleTarget instance
+        """
+        if height is None:
+            height = width
+        hw, hh = width / 2, height / 2
+        return cls(xmin=cx - hw, xmax=cx + hw, ymin=cy - hh, ymax=cy + hh, z=z)
+
+
+class DistantViewing(BaseViewing):
+    """Distant viewing for BRF measurements using mdistant measure.
+
+    Models an infinitely distant sensor looking at a target area.
+    Uses Eradiate's MultiDistantMeasure with rectangular targets for
+    pixel-level BRF measurements.
+
+    The sensor looks in the direction specified by `direction` (default: [0, 0, 1]
+    meaning looking down from above / nadir view).
+    """
+
+    type: Literal["distant"] = "distant"
+
+    target: Optional[Union[List[float], RectangleTarget]] = Field(
+        default=None,
+        description=(
+            "Target specification. Either:\n"
+            "- [x, y, z] point for a point target\n"
+            "- RectangleTarget for a rectangular area (pixel BRF)"
+        ),
+    )
+
+    direction: List[float] = Field(
+        default=[0, 0, 1],
+        description=(
+            "Viewing direction vector. Default [0, 0, 1] means looking "
+            "straight down (nadir view). For oblique views, adjust accordingly."
+        ),
+    )
+
+    ray_offset: Optional[float] = Field(
+        default=None,
+        description=(
+            "Distance between target and ray origins in meters. "
+            "If unset, ray origins are positioned automatically outside the scene."
+        ),
+    )
+
+    terrain_relative_height: bool = Field(
+        default=True,
+        description=(
+            "For point targets [x, y, z]: if True, z is offset from terrain. "
+            "For RectangleTarget: this field is ignored (rectangles use absolute z)."
+        ),
+    )
+
+
 class HemisphericalViewing(BaseViewing):
     """
     Viewing that covers the entire upper or lower hemisphere.
@@ -596,7 +694,7 @@ ViewingType = Union[
     AngularFromOriginViewing,
     LookAtViewing,
     HemisphericalViewing,
-    # LocationBased removed - use HemisphericalMeasurementLocation for location-based measurements
+    DistantViewing,
 ]
 
 
@@ -620,55 +718,51 @@ class IrradianceConfig(BaseModel):
 
 
 class BRFConfig(BaseModel):
-    """Configuration for Bidirectional Reflectance Factor (BRF) measurement.
+    """Configuration for BRF measurement WITHOUT atmosphere.
 
-    BRF is the ratio of radiance reflected in a specific direction to that from
-    a perfect Lambertian reflector under the same illumination conditions.
+    BRF = (π × L) / (E_toa × cos(SZA))
+
+    Uses TOA irradiance directly from simulation results (no white disk needed).
+    Requires simulation to run with atmosphere=None.
 
     Two modes:
-    1. Reference mode: Specify radiance_sensor_id + reference_radiance_sensor_id
-    2. Auto-generation mode: Specify viewing angles, backend creates sensors
+    1. Reference mode: Specify radiance_sensor_id (sensor already exists)
+    2. Auto-generation mode: Specify location + viewing, backend creates sensors
     """
 
     type: Literal["brf"] = "brf"
-    id: Optional[str] = Field(None, description="Unique identifier")
+    id: str = Field(description="Unique identifier")
 
-    # Mode 1: Reference existing sensors
+    # Mode 1: Reference existing sensor
     radiance_sensor_id: Optional[str] = Field(
-        None, description="ID of sensor providing actual radiance measurement"
-    )
-    reference_radiance_sensor_id: Optional[str] = Field(
-        None, description="ID of sensor providing reference radiance (Lambertian disk)"
+        None, description="ID of sensor providing radiance measurement"
     )
 
     # Mode 2: Auto-generation mode
-    viewing_zenith: Optional[float] = Field(
-        None, ge=0.0, le=180.0, description="Viewing zenith angle (auto-generation)"
+    viewing: Optional[Union[AngularFromOriginViewing, DistantViewing]] = Field(
+        None, description="Viewing geometry for radiancemeter (auto-generation)"
     )
-    viewing_azimuth: Optional[float] = Field(
-        None, ge=0.0, lt=360.0, description="Viewing azimuth angle (auto-generation)"
-    )
+
+    # Optional overrides
+    srf: Optional[SRFType] = Field(None, description="Spectral response function")
+    samples_per_pixel: int = Field(default=1024, ge=1)
+    terrain_relative_height: bool = Field(default=True)
 
     @model_validator(mode="after")
     def validate_brf_mode(self):
-        """Validate that either sensor references OR viewing angles are provided."""
-        has_refs = (
-            self.radiance_sensor_id is not None
-            and self.reference_radiance_sensor_id is not None
-        )
-        has_autogen = (
-            self.viewing_zenith is not None and self.viewing_azimuth is not None
-        )
+        """Validate that either sensor reference OR auto-generation specs are provided."""
+        has_ref = self.radiance_sensor_id is not None
+        has_autogen = self.viewing is not None
 
-        if has_refs and has_autogen:
+        if has_ref and has_autogen:
             raise ValueError(
-                "Specify either sensor references OR viewing angles, not both"
+                "Specify either radiance_sensor_id OR auto-generation mode (location + viewing), not both"
             )
 
-        if not has_refs and not has_autogen:
+        if not has_ref and not has_autogen:
             raise ValueError(
-                "Must specify either references (radiance_sensor_id + reference_radiance_sensor_id) "
-                "OR auto-generation mode (viewing_zenith + viewing_azimuth)"
+                "Must specify either radiance_sensor_id "
+                "OR auto-generation mode (location + viewing)"
             )
 
         return self
@@ -685,7 +779,7 @@ class HDRFConfig(BaseModel):
     """
 
     type: Literal["hdrf"] = "hdrf"
-    id: Optional[str] = Field(None, description="Unique identifier")
+    id: str = Field(description="Unique identifier")
 
     # Mode 1: Reference existing sensor + measurement
     radiance_sensor_id: Optional[str] = Field(
@@ -702,7 +796,9 @@ class HDRFConfig(BaseModel):
     location: Optional[HemisphericalMeasurementLocation] = Field(
         None, description="Location for hemispherical HDRF (auto-generation)"
     )
-    viewing: Optional[Union[LookAtViewing, AngularFromOriginViewing]] = Field(
+    viewing: Optional[
+        Union[LookAtViewing, AngularFromOriginViewing, DistantViewing]
+    ] = Field(
         None, description="Viewing geometry for radiancemeter HDRF (auto-generation)"
     )
     reference_height_offset_m: Optional[float] = Field(
@@ -714,7 +810,7 @@ class HDRFConfig(BaseModel):
         64, description="Samples per pixel for auto-generated sensors"
     )
     terrain_relative_height: bool = Field(
-        False, description="Terrain-relative height interpretation"
+        True, description="Terrain-relative height interpretation"
     )
 
     @model_validator(mode="after")
@@ -741,14 +837,107 @@ class HDRFConfig(BaseModel):
         if has_autogen:
             if self.instrument == "hemispherical" and not self.location:
                 raise ValueError("instrument='hemispherical' requires 'location'")
-            if self.instrument == "radiancemeter" and not self.viewing:
-                raise ValueError("instrument='radiancemeter' requires 'viewing'")
+            if self.instrument == "radiancemeter":
+                if not self.viewing:
+                    raise ValueError("instrument='radiancemeter' requires 'viewing'")
+                # For HDRF, location is also needed for irradiance measurement
+                if not self.location:
+                    raise ValueError(
+                        "instrument='radiancemeter' for HDRF requires 'location' "
+                        "for irradiance measurement generation"
+                    )
             if not self.reference_height_offset_m:
                 raise ValueError(
                     "Auto-generation mode requires 'reference_height_offset_m'"
                 )
 
         return self
+
+
+class BasePixelMeasurementConfig(BaseModel):
+    """Base configuration for pixel-based measurements at satellite pixel centers.
+
+    Maps satellite pixels to scene coordinates for reflectance measurements.
+    Subclasses define the specific measurement type (BRF, HDRF).
+    """
+
+    id: str = Field(description="Unique identifier for this pixel measurement")
+    satellite_sensor_id: str = Field(
+        description="ID of SatelliteSensor to use for geometry (target bounds, resolution)"
+    )
+    pixel_indices: List[Tuple[int, int]] = Field(
+        description="List of (row, col) pixel indices to measure. Row 0 is top (north), col 0 is left (west)."
+    )
+    height_offset_m: float = Field(
+        default=0.5,
+        ge=0.0,
+        description="Height above terrain surface for measurements (meters)",
+    )
+    samples_per_pixel: int = Field(
+        default=512,
+        ge=1,
+        description="Monte Carlo samples per pixel",
+    )
+    srf: Optional[SRFType] = Field(
+        default=None,
+        description="Spectral response function. If None, inherits from satellite sensor.",
+    )
+
+    @field_validator("pixel_indices")
+    @classmethod
+    def validate_pixel_indices(cls, v):
+        """Validate pixel indices are non-negative tuples."""
+        if not v:
+            raise ValueError("pixel_indices cannot be empty")
+        for i, (row, col) in enumerate(v):
+            if row < 0 or col < 0:
+                raise ValueError(
+                    f"Pixel index {i} has negative value: ({row}, {col}). "
+                    "Row and column must be >= 0."
+                )
+        return v
+
+
+class PixelHDRFConfig(BasePixelMeasurementConfig):
+    """BOA HDRF measurement at satellite pixel centers (WITH atmosphere).
+
+    HDRF = π × L_surface / E_boa
+
+    Uses satellite sensor geometry to map pixels to scene coordinates.
+    Requires 2N simulations for N pixels (irradiance + radiance per pixel).
+    """
+
+    type: Literal["pixel_hdrf"] = "pixel_hdrf"
+
+
+class PixelBRFConfig(BasePixelMeasurementConfig):
+    """BRF measurement at satellite pixel centers (NO atmosphere).
+
+    BRF = (π × L) / (E_toa × cos(SZA))
+
+    Uses satellite sensor geometry to map pixels to scene coordinates.
+    Simpler than PixelHDRF - uses TOA irradiance from results, no white disk needed.
+    Requires N simulations for N pixels (radiance only).
+    """
+
+    type: Literal["pixel_brf"] = "pixel_brf"
+
+
+class PixelBHRConfig(BasePixelMeasurementConfig):
+    """BHR measurement at satellite pixel centers (WITH atmosphere).
+
+    BHR = radiosity_surface / radiosity_white_reference
+
+    Uses satellite sensor geometry to map pixels to scene coordinates.
+    Requires 2N simulations for N pixels (surface + reference per pixel).
+    """
+
+    type: Literal["pixel_bhr"] = "pixel_bhr"
+    reference_height_offset_m: float = Field(
+        default=0.1,
+        ge=0.0,
+        description="Height offset for white reference patch above surface (meters)",
+    )
 
 
 class HCRFPostProcessingConfig(BaseModel):
@@ -806,7 +995,7 @@ class HCRFConfig(BaseModel):
     """
 
     type: Literal["hcrf"] = "hcrf"
-    id: Optional[str] = Field(None, description="Unique identifier")
+    id: str = Field(description="Unique identifier")
 
     # Mode 1: Reference existing sensor + measurement
     radiance_sensor_id: Optional[str] = Field(
@@ -835,7 +1024,7 @@ class HCRFConfig(BaseModel):
         description="Height offset for reference irradiance disk (auto-generation)",
     )
     samples_per_pixel: int = Field(64, description="Samples per pixel")
-    terrain_relative_height: bool = Field(False, description="Terrain-relative height")
+    terrain_relative_height: bool = Field(True, description="Terrain-relative height")
     post_processing: Optional[HCRFPostProcessingConfig] = Field(
         None, description="Post-processing configuration"
     )
@@ -1009,7 +1198,11 @@ class RadianceConfig(HemisphericalMeasurementLocation):
 class BHRConfig(HemisphericalMeasurementLocation):
     """Configuration for Bi-Hemispherical Reflectance (BHR) measurement.
 
-    BHR integrates reflectance over all viewing and illumination directions.
+    BHR = radiosity_surface / radiosity_white_reference
+
+    Uses distant_flux measure type in Eradiate. Requires two simulations
+    per measurement: one for the surface radiosity and one for a white
+    reference patch (ρ=1.0 Lambertian disk) at the same location.
     """
 
     type: Literal["bhr"] = "bhr"
@@ -1017,9 +1210,10 @@ class BHRConfig(HemisphericalMeasurementLocation):
         None,
         description="Unique identifier",
     )
-    integration_mode: Literal["full", "isotropic"] = Field(
-        default="full",
-        description="Integration mode: 'full' for complete integration, 'isotropic' for isotropic assumption",
+    reference_height_offset_m: float = Field(
+        default=0.1,
+        ge=0.0,
+        description="Height offset for white reference patch above surface (meters)",
     )
 
 
@@ -1029,6 +1223,9 @@ MeasurementConfig = Annotated[
         BRFConfig,
         HDRFConfig,
         HCRFConfig,
+        PixelHDRFConfig,
+        PixelBRFConfig,
+        PixelBHRConfig,
         RadianceConfig,
         BHRConfig,
     ],
@@ -1367,7 +1564,9 @@ class GroundInstrumentType(str, Enum):
 class GroundSensor(BaseSensor):
     platform_type: Literal[PlatformType.GROUND] = PlatformType.GROUND
     instrument: GroundInstrumentType
-    viewing: Union[LookAtViewing, AngularFromOriginViewing]
+    viewing: Union[
+        LookAtViewing, AngularFromOriginViewing, HemisphericalViewing, DistantViewing
+    ]
     fov: Optional[float] = Field(
         None,
         description="Field of view in degrees (for camera-like instruments: HYPSTAR, perspective_camera, dhp_camera)",
@@ -1416,8 +1615,16 @@ class GroundSensor(BaseSensor):
                     f"not '{self.viewing.type}'."
                 )
 
+        # Auto-generate ID if not provided
         if self.id is None:
-            self.id = f"ground_{self.instrument.value}_{int(self.viewing.origin[2])}m"
+            if hasattr(self.viewing, "origin"):
+                self.id = (
+                    f"ground_{self.instrument.value}_{int(self.viewing.origin[2])}m"
+                )
+            elif isinstance(self.viewing, DistantViewing):
+                self.id = f"ground_{self.instrument.value}_distant"
+            else:
+                self.id = f"ground_{self.instrument.value}"
         return self
 
 
@@ -1801,7 +2008,7 @@ class SimulationConfig(BaseModel):
                             f"as irradiance, but it is not an IrradianceConfig"
                         )
 
-            # Check BRF sensor references
+            # Check BRF sensor references (atmosphere-less BRF)
             if isinstance(measurement, BRFConfig):
                 if measurement.radiance_sensor_id:
                     if measurement.radiance_sensor_id not in sensor_ids:
@@ -1809,11 +2016,37 @@ class SimulationConfig(BaseModel):
                             f"BRF '{measurement.id}' references unknown sensor "
                             f"'{measurement.radiance_sensor_id}'"
                         )
-                if measurement.reference_radiance_sensor_id:
-                    if measurement.reference_radiance_sensor_id not in sensor_ids:
+
+            if isinstance(measurement, PixelBRFConfig):
+                if measurement.satellite_sensor_id not in sensor_ids:
+                    errors.append(
+                        f"PixelBRF '{measurement.id}' references unknown sensor "
+                        f"'{measurement.satellite_sensor_id}'"
+                    )
+                else:
+                    sensor = self.get_sensor(measurement.satellite_sensor_id)
+                    if sensor and not isinstance(sensor, SatelliteSensor):
                         errors.append(
-                            f"BRF '{measurement.id}' references unknown sensor "
-                            f"'{measurement.reference_radiance_sensor_id}'"
+                            f"PixelBRF '{measurement.id}' references sensor "
+                            f"'{measurement.satellite_sensor_id}' which is not a SatelliteSensor "
+                            f"(type: {type(sensor).__name__})"
+                        )
+
+            # Check PixelHDRF sensor references
+            if isinstance(measurement, PixelHDRFConfig):
+                if measurement.satellite_sensor_id not in sensor_ids:
+                    errors.append(
+                        f"PixelHDRF '{measurement.id}' references unknown sensor "
+                        f"'{measurement.satellite_sensor_id}'"
+                    )
+                else:
+                    # Validate that referenced sensor is a SatelliteSensor
+                    sensor = self.get_sensor(measurement.satellite_sensor_id)
+                    if sensor and not isinstance(sensor, SatelliteSensor):
+                        errors.append(
+                            f"PixelHDRF '{measurement.id}' references sensor "
+                            f"'{measurement.satellite_sensor_id}' which is not a SatelliteSensor "
+                            f"(type: {type(sensor).__name__})"
                         )
 
         if errors:

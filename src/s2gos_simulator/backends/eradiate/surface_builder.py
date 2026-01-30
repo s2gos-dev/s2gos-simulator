@@ -18,6 +18,8 @@ try:
 except ImportError:
     MITSUBA_AVAILABLE = False
 
+logger = logging.getLogger(__name__)
+
 
 class SurfaceBuilder:
     """Builder for creating surfaces, materials, and 3D objects."""
@@ -530,7 +532,7 @@ class SurfaceBuilder:
             },
             "id": disk_id,
         }
-        print(f"{obj_dict = }")
+        logger.info(f"{obj_dict = }")
 
         kdict[disk_id] = obj_dict
 
