@@ -157,7 +157,7 @@ class HDRFProcessor:
 
         Args:
             raw_results: Dictionary containing all raw sensor and irradiance results.
-            output_dir: Directory to save results.
+            output_dir: Directory for results (used by caller for saving).
 
         Returns:
             Dictionary of derived datasets keyed by the original measurement ID.
@@ -228,8 +228,6 @@ class HDRFProcessor:
                     },
                 )
 
-                output_file = output_dir / f"{meas_id}_{ref_type}.zarr"
-                result_ds.to_zarr(output_file, mode="w")
                 derived_results[meas_id] = result_ds
 
                 logger.info(f"Computed {ref_type.upper()} for '{meas_id}'")

@@ -515,9 +515,7 @@ class EradiateBackend(SimulationBackend):
 
         for i, measure in enumerate(experiment.measures):
             measure_id = getattr(measure, "id", f"measure_{i}")
-            logger.info(
-                f"  Measure {i + 1}/{len(experiment.measures)}: {measure_id}"
-            )
+            logger.info(f"  Measure {i + 1}/{len(experiment.measures)}: {measure_id}")
             eradiate.run(experiment, measures=i)
 
             # Get raw result
