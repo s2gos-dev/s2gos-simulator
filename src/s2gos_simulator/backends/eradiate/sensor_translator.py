@@ -228,6 +228,10 @@ class SensorTranslator:
 
         Returns:
             List of Eradiate measure dictionaries
+
+        Note:
+            Sensors with for_reference_only=True are skipped during translation
+            but remain accessible for geometry queries (e.g., pixel coordinate mapping).
         """
         self._current_scene_description = scene_description
         self._current_scene_dir = scene_dir
@@ -239,6 +243,14 @@ class SensorTranslator:
         for sensor in self.simulation_config.sensors:
             if sensor_ids is not None and sensor.id not in sensor_ids:
                 continue
+
+            if getattr(sensor, "for_reference_only", False):
+                logger.debug(
+                    f"Skipping reference-only sensor '{sensor.id}' "
+                    f"(used for geometry specification only for pixel measurements, not simulated)"
+                )
+                continue
+
             if isinstance(sensor, SatelliteSensor):
                 measures.append(
                     self.translate_satellite_sensor(sensor, scene_description)

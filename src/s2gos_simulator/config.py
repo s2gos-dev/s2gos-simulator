@@ -1271,6 +1271,17 @@ class SatelliteSensor(BaseSensor):
         ...,
         description="Target area size: float for square (km), tuple for rectangular (width_km, height_km)",
     )
+    for_reference_only: bool = Field(
+        default=False,
+        description=(
+            "If True, this sensor is used for geometry specification only "
+            "(e.g., for PixelHDRF/PixelBRF coordinate mapping) and will NOT be simulated. "
+            "Use this when you already have satellite data and only need the sensor's "
+            "geometry (lat/lon, resolution, viewing angles) for pixel index mapping. "
+            "The sensor remains accessible for coordinate queries but is excluded from "
+            "Eradiate measure translation."
+        ),
+    )
 
     @model_validator(mode="after")
     def validate_and_set_defaults(self):
