@@ -161,12 +161,6 @@ class EradiateBackend(SimulationBackend):
                         f"Ground sensor {sensor.id} instrument type {sensor.instrument} is not supported"
                     )
 
-        for measurement in self.simulation_config.measurements:
-            if measurement.type not in self.supported_measurements:
-                errors.append(
-                    f"Measurement type '{measurement.type}' is not supported by Eradiate backend"
-                )
-
         return errors
 
     def _validate_satellite_sensor(self, sensor) -> Optional[str]:
@@ -316,16 +310,16 @@ class EradiateBackend(SimulationBackend):
                     **kwargs,
                 )
                 all_results.update(hdrf_results)
-            # else:
-            #     logger.info("\nStandard workflow")
-            #     standard_results = self._run_standard_simulation(
-            #         scene_description,
-            #         scene_dir,
-            #         output_dir,
-            #         sensor_ids=non_brf_sensor_ids,
-            #         **kwargs,
-            #     )
-            #     all_results.update(standard_results)
+            else:
+                logger.info("\nStandard workflow")
+                standard_results = self._run_standard_simulation(
+                    scene_description,
+                    scene_dir,
+                    output_dir,
+                    sensor_ids=non_brf_sensor_ids,
+                    **kwargs,
+                )
+                all_results.update(standard_results)
 
         logger.info(f"\n✓ Simulation complete: {len(all_results)} total datasets")
         return all_results

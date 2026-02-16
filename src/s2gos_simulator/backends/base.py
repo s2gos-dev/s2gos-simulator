@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 
 import xarray as xr
 from s2gos_utils.scene import SceneDescription
@@ -10,11 +10,6 @@ class SimulationBackend(ABC):
     """Abstract base class for radiative transfer simulation backends.
 
     This class provides a generic interface for different radiative transfer models.
-    Each backend handles:
-    - Configuration translation from generic to backend-specific format
-    - Scene setup and surface creation
-    - Simulation execution
-    - Result processing and standardization
     """
 
     def __init__(self, simulation_config):
@@ -78,9 +73,13 @@ class SimulationBackend(ABC):
             errors.append("No sensors or measurements defined in configuration")
 
         # Check if backend supports all requested measurement types
-        unsupported_measurements = self._get_unsupported_measurements()
-        if unsupported_measurements:
-            errors.append(f"Unsupported measurement types: {unsupported_measurements}")
+        unsupported = [
+            m.type
+            for m in getattr(self.simulation_config, "measurements", [])
+            if m.type not in self.supported_measurements
+        ]
+        if unsupported:
+            errors.append(f"Unsupported measurement types: {unsupported}")
 
         return errors
 
@@ -101,110 +100,30 @@ class SimulationBackend(ABC):
         """
         return []
 
-    def _get_unsupported_measurements(self) -> List[str]:
-        """Get list of unsupported measurement types for this backend.
-
-        Override in specific backends to define supported measurements.
-
-        Returns:
-            List of unsupported measurement type names
-        """
-        return []
-
-    def _translate_illumination(self) -> Dict[str, Any]:
-        """Translate generic illumination config to backend-specific format.
-
-        Returns:
-            Backend-specific illumination configuration
-        """
-        # Default implementation - override in specific backends
-        return self.simulation_config.illumination.model_dump()
-
-    def _translate_sensors(self) -> List[Dict[str, Any]]:
-        """Translate generic sensor configs and radiative quantities to backend-specific format.
-
-        Note: This method now handles both sensors and radiative quantities.
-        Override in specific backends to provide proper translation.
-
-        Returns:
-            List of backend-specific measurement configurations
-        """
-        # Default implementation - override in specific backends
-        measures = [sensor.model_dump() for sensor in self.simulation_config.sensors]
-
-        # Add basic measurement handling if present
-        if hasattr(self.simulation_config, "measurements"):
-            for measurement in self.simulation_config.measurements:
-                measures.append(
-                    {
-                        "id": getattr(measurement, "id", f"{measurement.type}_measure"),
-                        "type": "placeholder",
-                        "measurement_type": measurement.type,
-                        "TODO": "Implement in specific backend",
-                    }
-                )
-
-        return measures
-
-    def _create_output_metadata(
-        self, output_dir: Optional[PathLike] = None
-    ) -> Dict[str, Any]:
-        """Create standardized output metadata.
-
-        Args:
-            output_dir: Output directory path
-
-        Returns:
-            Dictionary of metadata for output datasets
-        """
-        metadata = {
-            "simulation_name": self.simulation_config.name,
-            "backend": self.name,
-            "created_at": self.simulation_config.created_at.isoformat(),
-            "sensor_count": len(self.simulation_config.sensors),
-            "measurement_count": len(
-                getattr(self.simulation_config, "measurements", [])
-            ),
-            "measurement_types": [
-                mt.value for mt in self.simulation_config.output_quantities
-            ]
-            if hasattr(self.simulation_config, "output_quantities")
-            else [],
-            "wavelength_range": self.simulation_config.wavelength_range,
-            "orthorectified": self.simulation_config.processing.orthorectified,
-        }
-
-        if output_dir:
-            metadata["output_dir"] = str(output_dir)
-
-        return metadata
-
     @property
     def name(self) -> str:
         """Backend name for identification."""
         return self.__class__.__name__
 
     @property
+    @abstractmethod
     def supported_platforms(self) -> List[str]:
         """List of supported observation platforms.
-
-        Override in specific backends to define platform support.
 
         Returns:
             List of platform names this backend supports
         """
-        return ["satellite", "uav", "ground"]
+        ...
 
     @property
+    @abstractmethod
     def supported_measurements(self) -> List[str]:
         """List of supported measurement types.
-
-        Override in specific backends to define measurement support.
 
         Returns:
             List of measurement type names this backend supports
         """
-        return ["radiance", "brf", "hdrf", "bhr"]
+        ...
 
     def __str__(self) -> str:
         return f"{self.name}(available={self.is_available()})"

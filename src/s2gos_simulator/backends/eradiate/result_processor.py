@@ -53,7 +53,9 @@ class ResultProcessor:
         try:
             output_dir = UPath(output_dir)
             mkdir(output_dir)
-            sensor_output = output_dir / f"{self.simulation_config.name}_{sensor_id}.zarr"
+            sensor_output = (
+                output_dir / f"{self.simulation_config.name}_{sensor_id}.zarr"
+            )
 
             metadata = self.create_output_metadata(output_dir)
             dataset.attrs.update(metadata)
@@ -149,7 +151,10 @@ class ResultProcessor:
                                 * 1.8
                             )
                             img = np.clip(img, 0, 1)
-                            rgb_output = output_dir / f"{sensor_id}_rgb.png"
+                            rgb_output = (
+                                output_dir
+                                / f"{self.simulation_config.name}_{sensor_id}_rgb.png"
+                            )
                             plt_img = (img * 255).astype(np.uint8)
                             print(f"RGB image saved to: {rgb_output}")
                         else:
@@ -159,7 +164,10 @@ class ResultProcessor:
                             )
                             img_normalized = np.clip(img_normalized, 0, 1)
                             plt_img = (img_normalized * 255).astype(np.uint8)
-                            rgb_output = output_dir / f"{sensor_id}_grayscale.png"
+                            rgb_output = (
+                                output_dir
+                                / f"{self.simulation_config.name}_{sensor_id}_grayscale.png"
+                            )
                             print(f"Grayscale image saved to: {rgb_output}")
 
                         rgb_image = Image.fromarray(plt_img)
@@ -167,7 +175,10 @@ class ResultProcessor:
                             rgb_image.save(f, format="PNG")
 
                     else:
-                        spectral_output = output_dir / f"{sensor_id}_spectrum.png"
+                        spectral_output = (
+                            output_dir
+                            / f"{self.simulation_config.name}_{sensor_id}_spectrum.png"
+                        )
                         self.plot_spectral_data(radiance_data, spectral_output)
                         print(f"Spectral data plot saved to: {spectral_output}")
 
@@ -245,7 +256,10 @@ class ResultProcessor:
                     axes[1].legend()
 
                     plt.tight_layout()
-                    output_file = vis_dir / f"{measure_id}_hdrf_visualization.png"
+                    output_file = (
+                        vis_dir
+                        / f"{self.simulation_config.name}_{measure_id}_hdrf_visualization.png"
+                    )
                     plt.savefig(output_file, dpi=150, bbox_inches="tight")
                     plt.close()
 
@@ -264,7 +278,10 @@ class ResultProcessor:
                     ax.set_ylim([0, 1])
 
                     plt.tight_layout()
-                    output_file = vis_dir / f"{measure_id}_hdrf_spectrum.png"
+                    output_file = (
+                        vis_dir
+                        / f"{self.simulation_config.name}_{measure_id}_hdrf_spectrum.png"
+                    )
                     plt.savefig(output_file, dpi=150, bbox_inches="tight")
                     plt.close()
 
@@ -274,52 +291,3 @@ class ResultProcessor:
                 print(
                     f"  Warning: Could not create visualization for {measure_id}: {e}"
                 )
-
-    def create_dummy_radiative_quantity_result(
-        self, rad_quantity, output_dir: UPath, metadata: dict
-    ) -> UPath:
-        """Create dummy Zarr file for radiative quantity placeholder.
-
-        Args:
-            rad_quantity: Radiative quantity configuration
-            output_dir: Output directory
-            metadata: Metadata dictionary
-
-        Returns:
-            Path to created dummy Zarr file
-        """
-        quantity_id = f"{rad_quantity.quantity.value}_measure"
-        dummy_output = output_dir / f"{self.simulation_config.name}_{quantity_id}.zarr"
-
-        dummy_data = np.ones((10, 10)) * 0.5
-
-        wavelengths = [550.0]
-        srf = rad_quantity.srf
-        if srf.type == "delta" and srf.wavelengths:
-            wavelengths = srf.wavelengths
-
-        if len(wavelengths) > 1:
-            dummy_values = np.stack([dummy_data for _ in wavelengths], axis=0)
-            coords = {
-                "w": wavelengths,
-                "x": range(dummy_data.shape[0]),
-                "y": range(dummy_data.shape[1]),
-            }
-            dims = ["w", "x", "y"]
-        else:
-            dummy_values = dummy_data
-            coords = {"x": range(dummy_data.shape[0]), "y": range(dummy_data.shape[1])}
-            dims = ["x", "y"]
-
-        dummy_ds = xr.Dataset(
-            {rad_quantity.quantity.value: (dims, dummy_values)}, coords=coords
-        )
-
-        dummy_ds.attrs.update(metadata)
-        dummy_ds.attrs["quantity_id"] = quantity_id
-        dummy_ds.attrs["note"] = "DUMMY DATA - placeholder for future implementation"
-
-        dummy_ds.to_zarr(dummy_output, mode="w")
-        print(f"Dummy data for '{quantity_id}' saved to {dummy_output}")
-
-        return dummy_output

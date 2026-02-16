@@ -1647,67 +1647,6 @@ class ProcessingConfig(BaseModel):
     )
 
 
-def create_satellite_sensor(
-    platform: SatellitePlatform,
-    instrument: SatelliteInstrument,
-    band: str,
-    zenith: float = 0.0,
-    azimuth: float = 0.0,
-    **kwargs,
-) -> SatelliteSensor:
-    """Create a satellite sensor with validated platform/instrument/band combination.
-
-    Args:
-        platform: Satellite platform (use SatellitePlatform enum)
-        instrument: Satellite instrument (use SatelliteInstrument enum)
-        band: Band identifier (validated against instrument)
-        zenith: Viewing zenith angle in degrees (0=nadir, >0=oblique)
-        azimuth: Viewing azimuth angle in degrees
-        **kwargs: Additional sensor parameters
-
-    Returns:
-        SatelliteSensor configured with the specified identifiers
-    """
-    return SatelliteSensor(
-        platform=platform,
-        instrument=instrument,
-        band=band,
-        viewing=AngularViewing(zenith=zenith, azimuth=azimuth),
-        **kwargs,
-    )
-
-
-def create_custom_satellite_sensor(
-    instrument_name: str,
-    band_name: str,
-    srf: SRFType,
-    zenith: float = 0.0,
-    azimuth: float = 0.0,
-    **kwargs,
-) -> SatelliteSensor:
-    """Create a custom satellite sensor with user-provided SRF.
-
-    Args:
-        instrument_name: Custom instrument identifier
-        band_name: Custom band identifier
-        srf: Spectral response function (SpectralResponse object or string)
-        zenith: Viewing zenith angle in degrees (0=nadir, >0=oblique)
-        azimuth: Viewing azimuth angle in degrees
-        **kwargs: Additional sensor parameters
-
-    Returns:
-        SatelliteSensor configured as a custom platform
-    """
-    return SatelliteSensor(
-        platform=SatellitePlatform.CUSTOM,
-        instrument=SatelliteInstrument.CUSTOM,
-        band=band_name,
-        srf=srf,
-        viewing=AngularViewing(zenith=zenith, azimuth=azimuth),
-        **kwargs,
-    )
-
-
 # =============================================================================
 # CHIME Hyperspectral Satellite Support
 # =============================================================================
