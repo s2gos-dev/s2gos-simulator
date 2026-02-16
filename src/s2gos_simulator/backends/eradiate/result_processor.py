@@ -63,12 +63,12 @@ class ResultProcessor:
             dataset.attrs["result_type"] = result_type
 
             dataset.to_zarr(sensor_output, mode="w")
-            print(f"  ✓ Saved '{sensor_id}' → {sensor_output.name}")
+            logger.info(f"Saved '{sensor_id}' → {sensor_output.name}")
 
             return True
 
         except Exception as e:
-            print(f"  ✗ Failed to save '{sensor_id}': {e}")
+            logger.warning(f"Failed to save '{sensor_id}': {e}")
             logger.error(
                 f"Failed to save sensor result '{sensor_id}': {e}", exc_info=True
             )
@@ -114,12 +114,16 @@ class ResultProcessor:
             sensor_ids = id_to_plot
 
         if len(sensor_ids) > 1:
-            print(f"Creating RGB visualizations for {len(sensor_ids)} sensor(s)...")
+            logger.info(
+                f"Creating RGB visualizations for {len(sensor_ids)} sensor(s)..."
+            )
 
         for sensor_id in sensor_ids:
             try:
                 if sensor_id not in experiment.results:
-                    print(f"Warning: Sensor '{sensor_id}' not found in results")
+                    logger.warning(
+                        f"Warning: Sensor '{sensor_id}' not found in results"
+                    )
                     continue
 
                 sensor_data = experiment.results[sensor_id]
@@ -156,7 +160,7 @@ class ResultProcessor:
                                 / f"{self.simulation_config.name}_{sensor_id}_rgb.png"
                             )
                             plt_img = (img * 255).astype(np.uint8)
-                            print(f"RGB image saved to: {rgb_output}")
+                            logger.info(f"RGB image saved to: {rgb_output}")
                         else:
                             img_data = radiance_data.squeeze().values
                             img_normalized = (img_data - img_data.min()) / (
@@ -168,7 +172,7 @@ class ResultProcessor:
                                 output_dir
                                 / f"{self.simulation_config.name}_{sensor_id}_grayscale.png"
                             )
-                            print(f"Grayscale image saved to: {rgb_output}")
+                            logger.info(f"Grayscale image saved to: {rgb_output}")
 
                         rgb_image = Image.fromarray(plt_img)
                         with open_file(rgb_output, "wb") as f:
@@ -180,10 +184,12 @@ class ResultProcessor:
                             / f"{self.simulation_config.name}_{sensor_id}_spectrum.png"
                         )
                         self.plot_spectral_data(radiance_data, spectral_output)
-                        print(f"Spectral data plot saved to: {spectral_output}")
+                        logge.info(f"Spectral data plot saved to: {spectral_output}")
 
             except Exception as e:
-                print(f"Warning: Could not create visualization for {sensor_id}: {e}")
+                logger.warning(
+                    f"Warning: Could not create visualization for {sensor_id}: {e}"
+                )
 
     def plot_spectral_data(self, radiance_data, output_path: UPath):
         """Plot spectral data for point sensors.
@@ -210,9 +216,9 @@ class ResultProcessor:
             plt.close()
 
         except ImportError:
-            print("Warning: matplotlib not available for spectral plotting")
+            logger.warning("Warning: matplotlib not available for spectral plotting")
         except Exception as e:
-            print(f"Warning: Could not create spectral plot: {e}")
+            logger.warning(f"Warning: Could not create spectral plot: {e}")
 
     def create_hdrf_visualizations(
         self, hdrf_results: Dict[str, xr.Dataset], output_dir: UPath
@@ -263,7 +269,7 @@ class ResultProcessor:
                     plt.savefig(output_file, dpi=150, bbox_inches="tight")
                     plt.close()
 
-                    print(f"  Saved HDRF visualization: {output_file.name}")
+                    logger.info(f"  Saved HDRF visualization: {output_file.name}")
 
                 elif "w" in hdrf_data.dims:
                     fig, ax = plt.subplots(figsize=(10, 6))
@@ -285,9 +291,9 @@ class ResultProcessor:
                     plt.savefig(output_file, dpi=150, bbox_inches="tight")
                     plt.close()
 
-                    print(f"  Saved HDRF spectrum: {output_file.name}")
+                    logger.info(f"  Saved HDRF spectrum: {output_file.name}")
 
             except Exception as e:
-                print(
+                logger.warning(
                     f"  Warning: Could not create visualization for {measure_id}: {e}"
                 )
