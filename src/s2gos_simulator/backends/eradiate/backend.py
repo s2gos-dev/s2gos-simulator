@@ -88,6 +88,7 @@ class EradiateBackend(SimulationBackend):
 
         self._current_scene_dir = None
         self._current_scene_description = None
+        self.irradiance_disk_coords: dict[str, tuple[float, float, float]] = {}
 
     def is_available(self) -> bool:
         """Check if Eradiate dependencies are available.
@@ -436,8 +437,11 @@ class EradiateBackend(SimulationBackend):
             **kwargs,
         )
 
-        irr_results = irradiance_processor.execute_irradiance_measurements(
+        irr_results, disk_coords = irradiance_processor.execute_irradiance_measurements(
             scene_description, scene_dir, output_dir / "boa_irradiance"
+        )
+        self.irradiance_disk_coords = (
+            disk_coords  # replaces dict each run — no stale entries
         )
 
         combined_results = {**sensor_results, **irr_results}

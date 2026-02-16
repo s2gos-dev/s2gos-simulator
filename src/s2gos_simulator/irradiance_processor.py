@@ -174,7 +174,13 @@ class IrradianceProcessor:
         scene_description: SceneDescription,
         scene_dir: UPath,
         output_dir: UPath,
-    ) -> Dict[str, xr.Dataset]:
+    ) -> tuple[Dict[str, xr.Dataset], Dict[str, tuple[float, float, float]]]:
+        """Execute irradiance measurements.
+
+        Returns:
+            Tuple of (results, disk_coords) — disk_coords maps measurement ID
+            to (x, y, z) scene coordinates of the reference disk.
+        """
         import eradiate
         from s2gos_utils.io.paths import mkdir
 
@@ -183,11 +189,8 @@ class IrradianceProcessor:
         logger.info("=" * 60)
         mkdir(output_dir)
 
-        # Store disk coords for backend (TODO: refactor to avoid this side effect)
-        if not hasattr(self.backend, "irradiance_disk_coords"):
-            self.backend.irradiance_disk_coords = {}
-
         results = {}
+        disk_coords: Dict[str, tuple[float, float, float]] = {}
         # Filter for IrradianceConfig instances from unified measurements list
         from .config import IrradianceConfig
 
@@ -200,15 +203,17 @@ class IrradianceProcessor:
         disk_scenes = {}
         for config in irradiance_configs:
             logger.info(f"\n[{config.id}] Creating reference disk...")
-            disk_scene, disk_coords = self.create_reference_disk_scene(
+            disk_scene, coords = self.create_reference_disk_scene(
                 scene_description,
                 scene_dir,
                 config.location,
                 config.location.height_offset_m,
                 disk_id=f"disk_{config.id}",
             )
-            self.backend.irradiance_disk_coords[config.id] = disk_coords
+            disk_coords[config.id] = coords
             disk_scenes[config.id] = disk_scene
+
+        self.backend.irradiance_disk_coords = disk_coords
 
         for config in irradiance_configs:
             disk_scene = disk_scenes[config.id]
@@ -258,4 +263,4 @@ class IrradianceProcessor:
         logger.info(f"\n{'=' * 60}")
         logger.info(f"Complete: {len(results)} measurements")
         logger.info(f"{'=' * 60}\n")
-        return results
+        return results, disk_coords

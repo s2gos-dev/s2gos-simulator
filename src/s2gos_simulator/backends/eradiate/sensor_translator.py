@@ -273,13 +273,10 @@ class SensorTranslator:
         if include_irradiance_measures:
             for measurement in self.simulation_config.measurements:
                 if isinstance(measurement, IrradianceConfig):
-                    if self.backend is None or not hasattr(
-                        self.backend, "irradiance_disk_coords"
-                    ):
+                    if self.backend is None:
                         raise RuntimeError(
                             f"Cannot create irradiance measure '{measurement.id}': "
-                            f"Backend irradiance_disk_coords not available. "
-                            f"IrradianceProcessor must run before creating measures."
+                            f"No backend attached to SensorTranslator."
                         )
 
                     disk_coords = self.backend.irradiance_disk_coords.get(
