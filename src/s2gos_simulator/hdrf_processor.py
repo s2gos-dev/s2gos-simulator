@@ -5,7 +5,7 @@ import xarray as xr
 from s2gos_utils.scene import SceneDescription
 from upath import UPath
 
-from .backends.eradiate.reflectance_computation import compute_reflectance_factor
+from .backends.eradiate.reflectance_computation import compute_hdrf, compute_hcrf
 from .config import HCRFConfig, HDRFConfig
 from .irradiance_processor import IrradianceProcessor
 
@@ -217,16 +217,24 @@ class HDRFProcessor:
                 continue
 
             try:
-                result_ds = compute_reflectance_factor(
-                    radiance=L_data,
-                    reference=E_data,
-                    reflectance_type=ref_type,
-                    measurement_id=meas_id,
-                    extra_attrs={
-                        "linked_radiance_id": rad_id,
-                        "linked_irradiance_id": irr_id,
-                    },
-                )
+                extra_attrs = {
+                    "linked_radiance_id": rad_id,
+                    "linked_irradiance_id": irr_id,
+                }
+                if ref_type == "hdrf":
+                    result_ds = compute_hdrf(
+                        radiance=L_data,
+                        boa_irradiance=E_data,
+                        measurement_id=meas_id,
+                        extra_attrs=extra_attrs,
+                    )
+                else:
+                    result_ds = compute_hcrf(
+                        radiance=L_data,
+                        boa_irradiance=E_data,
+                        measurement_id=meas_id,
+                        extra_attrs=extra_attrs,
+                    )
 
                 derived_results[meas_id] = result_ds
 

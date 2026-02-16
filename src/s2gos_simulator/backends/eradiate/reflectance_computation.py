@@ -1,4 +1,4 @@
-"""Unified reflectance computation for HDRF, HCRF, and BRF."""
+"""Reflectance computation for BRF, HDRF, HCRF, and BHR."""
 
 import logging
 from typing import Literal, Optional
@@ -34,6 +34,22 @@ def align_and_broadcast_datasets(
         if not np.array_equal(
             radiance[wavelength_dim].values, reference[wavelength_dim].values
         ):
+            rad_min, rad_max = (
+                float(radiance[wavelength_dim].min()),
+                float(radiance[wavelength_dim].max()),
+            )
+            ref_min, ref_max = (
+                float(reference[wavelength_dim].min()),
+                float(reference[wavelength_dim].max()),
+            )
+
+            if rad_min < ref_min or rad_max > ref_max:
+                logger.warning(
+                    f"Radiance wavelength range [{rad_min}, {rad_max}] nm extends beyond "
+                    f"reference range [{ref_min}, {ref_max}] nm. "
+                    f"Edge wavelengths will be NaN after interpolation."
+                )
+
             reference = reference.interp(
                 {wavelength_dim: radiance[wavelength_dim]}, method="linear"
             )
@@ -44,60 +60,98 @@ def align_and_broadcast_datasets(
     return radiance, reference
 
 
-def compute_reflectance_factor(
+def compute_brf(
     radiance: xr.DataArray,
-    reference: xr.DataArray,
-    reflectance_type: ReflectanceType,
+    toa_irradiance: xr.DataArray,
+    cos_sza: float,
     measurement_id: str,
-    cos_sza: Optional[float] = None,
     extra_attrs: Optional[dict] = None,
 ) -> xr.Dataset:
-    """Compute reflectance factor.
-
-    Args:
-        radiance: Radiance DataArray (L)
-        reference: Reference irradiance DataArray (E)
-        reflectance_type: Type of reflectance ("hdrf", "hcrf", or "brf")
-        measurement_id: Identifier for this measurement
-        cos_sza: Cosine of solar zenith angle (required for BRF)
-        extra_attrs: Additional attributes to include in the dataset
-
-    Returns:
-        xarray Dataset containing the reflectance factor
-
-    Raises:
-        ValueError: If cos_sza not provided for BRF computation
+    """Compute BRF: BRF = (π × L) / (E_toa × cos(SZA)).
+    No atmosphere — uses TOA irradiance directly.
     """
-    L, E = align_and_broadcast_datasets(radiance, reference)
+    L, E = align_and_broadcast_datasets(radiance, toa_irradiance)
+    result = (np.pi * L) / (E * cos_sza)
+    attrs = {
+        "measurement_type": "brf",
+        "measurement_id": measurement_id,
+        "units": "dimensionless",
+        "formula": "BRF = (pi * L) / (E_toa * cos(SZA))",
+        "cos_sza": float(cos_sza),
+    }
+    if extra_attrs:
+        attrs.update(extra_attrs)
+    return xr.Dataset({"brf": result}, attrs=attrs)
 
-    if reflectance_type == "brf":
-        if cos_sza is None:
-            raise ValueError("cos_sza is required for BRF computation")
-        result = (np.pi * L) / (E * cos_sza)
-        formula = "BRF = (pi * L) / (E_toa * cos(SZA))"
-    elif reflectance_type == "bhr":
-        # BHR is simple ratio of radiosity values (no pi factor)
-        # L = surface radiosity, E = reference radiosity (white Lambertian disk)
-        result = L / E
-        formula = "BHR = J_surface / J_reference"
-    else:
-        result = (np.pi * L) / E
-        formula = f"{reflectance_type.upper()} = (pi * L) / E"
 
+def _compute_h_reflectance(
+    reflectance_type: Literal["hdrf", "hcrf"],
+    radiance: xr.DataArray,
+    boa_irradiance: xr.DataArray,
+    measurement_id: str,
+    extra_attrs: Optional[dict] = None,
+) -> xr.Dataset:
+    """Shared implementation for HDRF and HCRF (same formula, different geometry)."""
+    L, E = align_and_broadcast_datasets(radiance, boa_irradiance)
+    result = (np.pi * L) / E
     attrs = {
         "measurement_type": reflectance_type,
         "measurement_id": measurement_id,
         "units": "dimensionless",
-        "formula": formula,
+        "formula": f"{reflectance_type.upper()} = (pi * L) / E_boa",
     }
-
-    if cos_sza is not None:
-        attrs["cos_sza"] = float(cos_sza)
-
     if extra_attrs:
         attrs.update(extra_attrs)
+    return xr.Dataset({reflectance_type: result}, attrs=attrs)
 
-    return xr.Dataset(
-        {reflectance_type: result},
-        attrs=attrs,
+
+def compute_hdrf(
+    radiance: xr.DataArray,
+    boa_irradiance: xr.DataArray,
+    measurement_id: str,
+    extra_attrs: Optional[dict] = None,
+) -> xr.Dataset:
+    """Compute HDRF: HDRF = (π × L) / E_boa.
+    Hemispherical-Directional — single viewing direction, atmosphere present.
+    """
+    return _compute_h_reflectance(
+        "hdrf", radiance, boa_irradiance, measurement_id, extra_attrs
     )
+
+
+def compute_hcrf(
+    radiance: xr.DataArray,
+    boa_irradiance: xr.DataArray,
+    measurement_id: str,
+    extra_attrs: Optional[dict] = None,
+) -> xr.Dataset:
+    """Compute HCRF: HCRF = (π × L) / E_boa.
+    Hemispherical-Conical — conical FOV averaged, atmosphere present.
+    Same formula as HDRF; distinction is in measurement geometry.
+    """
+    return _compute_h_reflectance(
+        "hcrf", radiance, boa_irradiance, measurement_id, extra_attrs
+    )
+
+
+def compute_bhr(
+    surface_radiosity: xr.DataArray,
+    reference_radiosity: xr.DataArray,
+    measurement_id: str,
+    extra_attrs: Optional[dict] = None,
+) -> xr.Dataset:
+    """Compute BHR: BHR = J_surface / J_reference.
+    Both quantities are radiosity [W/m²]; no π factor needed.
+    Reference is a white Lambertian disk (ρ=1.0).
+    """
+    J, J_ref = align_and_broadcast_datasets(surface_radiosity, reference_radiosity)
+    result = J / J_ref
+    attrs = {
+        "measurement_type": "bhr",
+        "measurement_id": measurement_id,
+        "units": "dimensionless",
+        "formula": "BHR = J_surface / J_reference",
+    }
+    if extra_attrs:
+        attrs.update(extra_attrs)
+    return xr.Dataset({"bhr": result}, attrs=attrs)

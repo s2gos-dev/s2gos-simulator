@@ -233,15 +233,11 @@ class BHRProcessor:
         Returns:
             Dataset containing BHR values
         """
-        from .backends.eradiate.reflectance_computation import (
-            compute_reflectance_factor,
-        )
+        from .backends.eradiate.reflectance_computation import compute_bhr
 
-        # Use the unified reflectance computation function
-        bhr_ds = compute_reflectance_factor(
-            radiance=surface_radiosity,
-            reference=reference_radiosity,
-            reflectance_type="bhr",
+        bhr_ds = compute_bhr(
+            surface_radiosity=surface_radiosity,
+            reference_radiosity=reference_radiosity,
             measurement_id=bhr_config.id,
             extra_attrs={
                 "reference_height_offset_m": bhr_config.reference_height_offset_m,

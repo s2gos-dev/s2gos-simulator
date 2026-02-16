@@ -85,9 +85,7 @@ class BRFProcessor:
         Raises:
             ValueError: If illumination is not directional or required data missing
         """
-        from .backends.eradiate.reflectance_computation import (
-            compute_reflectance_factor,
-        )
+        from .backends.eradiate.reflectance_computation import compute_brf
 
         # Get radiance and irradiance from dataset
         L = radiance_dataset["radiance"]
@@ -103,13 +101,12 @@ class BRFProcessor:
         sza_rad = np.deg2rad(illumination.zenith)
         cos_sza = np.cos(sza_rad)
 
-        # Compute BRF using unified function
-        brf_ds = compute_reflectance_factor(
+        # Compute BRF
+        brf_ds = compute_brf(
             radiance=L,
-            reference=E_toa,
-            reflectance_type="brf",
-            measurement_id=brf_config.id,
+            toa_irradiance=E_toa,
             cos_sza=cos_sza,
+            measurement_id=brf_config.id,
             extra_attrs={
                 "solar_zenith_deg": illumination.zenith,
                 "atmosphere": "none",
