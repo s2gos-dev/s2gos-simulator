@@ -12,7 +12,6 @@ The ratio gives BHR directly without π normalization (unlike HDRF).
 """
 
 import logging
-from dataclasses import replace
 from typing import Dict, List, Tuple
 
 import xarray as xr
@@ -20,11 +19,9 @@ from s2gos_utils.scene import SceneDescription
 from upath import UPath
 
 from .config import BHRConfig
+from .irradiance_processor import insert_reference_disk
 
 logger = logging.getLogger(__name__)
-
-# Same reference disk radius as irradiance measurements for consistency
-REFERENCE_DISK_RADIUS_M = 0.01  # 1cm radius
 
 
 class BHRProcessor:
@@ -196,24 +193,11 @@ class BHRProcessor:
 
         disk_id = f"bhr_white_reference_{bhr_config.id}"
 
-        # Create disk object
-        reference_disk = {
-            "object_id": disk_id,
-            "type": "disk",
-            "center": [x, y, disk_z],
-            "radius": REFERENCE_DISK_RADIUS_M,
-        }
-
-        # Shallow copy scene with new objects list (avoid modifying original)
-        new_objects = (scene_description.objects or []).copy()
-        new_objects.insert(0, reference_disk)
-        disk_scene = replace(scene_description, objects=new_objects)
-
         logger.info(
             f"Created BHR white reference disk '{disk_id}' at "
             f"({x:.2f}, {y:.2f}, {disk_z:.2f}) m"
         )
-        return disk_scene, (x, y, disk_z)
+        return insert_reference_disk(scene_description, x, y, disk_z, disk_id=disk_id)
 
     def compute_bhr(
         self,
@@ -297,12 +281,11 @@ class BHRProcessor:
 
                 # Step 1: Surface simulation
                 logger.info("  Step 1: Running surface radiosity simulation...")
-                surface_experiment = self.backend._create_experiment_for_bhr(
-                    scene_description,
-                    scene_dir,
-                    bhr_config,
-                    target_coords,
-                    is_reference=False,
+                surface_measure = self.backend.sensor_translator.create_distant_flux_measure(
+                    bhr_config, target_coords, is_reference=False
+                )
+                surface_experiment = self.backend._create_experiment(
+                    scene_description, scene_dir, measures=[surface_measure]
                 )
 
                 surface_measure_id = f"bhr_surface_{bhr_config.id}".replace(".", "_")
@@ -323,12 +306,11 @@ class BHRProcessor:
                     scene_description, scene_dir, bhr_config
                 )
 
-                ref_experiment = self.backend._create_experiment_for_bhr(
-                    ref_scene,
-                    scene_dir,
-                    bhr_config,
-                    disk_coords,
-                    is_reference=True,
+                ref_measure = self.backend.sensor_translator.create_distant_flux_measure(
+                    bhr_config, disk_coords, is_reference=True
+                )
+                ref_experiment = self.backend._create_experiment(
+                    ref_scene, scene_dir, measures=[ref_measure]
                 )
 
                 ref_measure_id = f"bhr_reference_{bhr_config.id}".replace(".", "_")

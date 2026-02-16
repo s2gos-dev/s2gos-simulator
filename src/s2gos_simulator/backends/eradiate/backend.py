@@ -334,7 +334,11 @@ class EradiateBackend(SimulationBackend):
         sensor_ids: Optional[set] = None,
         **kwargs,
     ) -> xr.Dataset:
-        """Run standard simulation (BRF, radiance, etc.).
+        """Run radiance simulation with atmosphere (used for plain sensor runs).
+
+        This is NOT used for BRF (no atmosphere), that is handled by `_run_brf_workflow`.
+        NOT used for BOA irradiance measurements, that is handled by `IrradianceProcessor`
+        Atmosphere is built from scene description via `_create_experiment(atmosphere="auto")`.
 
         Args:
             scene_description: Scene description
@@ -410,7 +414,12 @@ class EradiateBackend(SimulationBackend):
         sensor_ids: Optional[set] = None,
         **kwargs,
     ) -> xr.Dataset:
-        """Execute combined workflow with dual simulation for HDRF/HCRF.
+        """Execute combined workflow for BOA Irradiance, HDRF/HCRF measurements.
+
+        Runs two simulations with atmosphere:
+        1. Radiance simulation for all sensors
+        2. BOA irradiance simulation using white reference disk(s)
+        Then derives HDRF/HCRF from the ratio (see HDRFProcessor).
 
         Args:
             scene_description: Scene description
@@ -440,9 +449,7 @@ class EradiateBackend(SimulationBackend):
         irr_results, disk_coords = irradiance_processor.execute_irradiance_measurements(
             scene_description, scene_dir, output_dir / "boa_irradiance"
         )
-        self.irradiance_disk_coords = (
-            disk_coords  # replaces dict each run — no stale entries
-        )
+        self.irradiance_disk_coords = disk_coords
 
         combined_results = {**sensor_results, **irr_results}
 
@@ -561,6 +568,7 @@ class EradiateBackend(SimulationBackend):
         include_irradiance_measures: bool = True,
         atmosphere: Optional[str] = "auto",
         sensor_ids: Optional[set] = None,
+        measures: Optional[list] = None,
     ):
         """Create Eradiate experiment from scene description.
 
@@ -574,6 +582,10 @@ class EradiateBackend(SimulationBackend):
             sensor_ids: Optional set of sensor IDs to include. If None, all sensors
                 are included. Use this to filter sensors for specific workflows
                 (e.g., only BRF sensors for BRF workflow).
+            measures: Pre-built Eradiate measure dicts. When provided,
+                translate_sensors() is bypassed and these measures are used directly.
+                include_irradiance_measures and sensor_ids are ignored.
+                Use this when the caller owns measure construction (e.g. BHR distant_flux).
 
         Returns:
             AtmosphereExperiment configured for the scene
@@ -634,9 +646,10 @@ class EradiateBackend(SimulationBackend):
 
         illumination = self.sensor_translator.translate_illumination()
 
-        measures = self.sensor_translator.translate_sensors(
-            scene_description, scene_dir, include_irradiance_measures, sensor_ids
-        )
+        if measures is None:
+            measures = self.sensor_translator.translate_sensors(
+                scene_description, scene_dir, include_irradiance_measures, sensor_ids
+            )
 
         logger.debug(
             f"Experiment measures: {[m.get('id', i) for i, m in enumerate(measures)]}"
@@ -659,100 +672,6 @@ class EradiateBackend(SimulationBackend):
             geometry=geometry,
             atmosphere=atmosphere_obj,
             surface=None,  # We set this up through the expert interface (kdict, kpmap)
-            illumination=illumination,
-            measures=measures,
-            kdict=kdict,
-            kpmap=kpmap,
-        )
-
-    def _create_experiment_for_bhr(
-        self,
-        scene_description: SceneDescription,
-        scene_dir: UPath,
-        bhr_config: BHRConfig,
-        target_coords: tuple,
-        is_reference: bool = False,
-    ):
-        """Create Eradiate experiment for BHR measurement using distant_flux.
-
-        Similar to _create_experiment() but uses distant_flux measure specifically
-        for BHR workflow.
-
-        Args:
-            scene_description: Scene description (may include white reference disk)
-            scene_dir: Base directory for resolving file paths
-            bhr_config: BHR configuration
-            target_coords: Target coordinates (x, y, z) for the measurement
-            is_reference: If True, this is the white reference simulation
-
-        Returns:
-            AtmosphereExperiment configured for BHR measurement
-        """
-        self._current_scene_dir = scene_dir
-        self._current_scene_description = scene_description
-
-        self._validate_object_materials(scene_description)
-        kdict, kpmap = self.surface_builder.translate_materials(
-            scene_description, scene_dir
-        )
-
-        hamster_data_dict = self._get_hamster_data_for_scene(
-            scene_description, scene_dir
-        )
-        self.surface_builder.add_hamster_materials(
-            kdict, kpmap, scene_description, hamster_data_dict
-        )
-
-        hamster_available = hamster_data_dict is not None
-        kdict.update(
-            self.surface_builder.create_target_surface(
-                scene_description, scene_dir, hamster_available
-            )
-        )
-
-        if scene_description.buffer:
-            kdict.update(
-                self.surface_builder.create_buffer_surface(
-                    scene_description, scene_dir, hamster_available
-                )
-            )
-
-        if scene_description.background:
-            kdict.update(
-                self.surface_builder.create_background_surface(
-                    scene_description, scene_dir, hamster_available
-                )
-            )
-
-        self.surface_builder.add_scene_objects(kdict, scene_description, scene_dir)
-
-        # BHR uses atmosphere (unlike BRF)
-        atmosphere_obj = self.atmosphere_builder.create_atmosphere_from_config(
-            scene_description
-        )
-
-        illumination = self.sensor_translator.translate_illumination()
-
-        # Create distant_flux measure for BHR
-        measure = self.sensor_translator.create_distant_flux_measure(
-            bhr_config, target_coords, is_reference
-        )
-        measures = [measure]
-
-        logger.debug(
-            f"BHR experiment measure: {measure.get('id')} (reference={is_reference})"
-        )
-
-        geometry = self.atmosphere_builder.create_geometry_from_atmosphere(
-            scene_description
-        )
-
-        self.surface_builder.validate_material_ids(kdict, scene_description)
-
-        return AtmosphereExperiment(
-            geometry=geometry,
-            atmosphere=atmosphere_obj,
-            surface=None,
             illumination=illumination,
             measures=measures,
             kdict=kdict,

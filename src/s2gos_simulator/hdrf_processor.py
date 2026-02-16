@@ -2,7 +2,6 @@ import logging
 from typing import Dict, List, Optional, Tuple
 
 import xarray as xr
-from s2gos_utils.scene import SceneDescription
 from upath import UPath
 
 from .backends.eradiate.reflectance_computation import compute_hdrf, compute_hcrf
@@ -118,35 +117,6 @@ class HDRFProcessor:
                     )
 
         return None
-
-    def create_white_reference_scene(
-        self, scene_description: SceneDescription, scene_dir: UPath
-    ) -> Tuple[SceneDescription, Tuple[float, float, float]]:
-        """Create white reference scene for HDRF (delegates to IrradianceProcessor)."""
-        hdrf_measure_ids = self.get_hdrf_measure_ids()
-        if not hdrf_measure_ids:
-            raise ValueError("No HDRF measures found")
-
-        hdrf_config = self._get_hdrf_config_for_measure(hdrf_measure_ids[0])
-        if hdrf_config is None:
-            raise ValueError(f"HDRF config not found for '{hdrf_measure_ids[0]}'")
-
-        lat, lon, height_offset = hdrf_config
-
-        # Use scene center if no specific location configured
-        if lat is None or lon is None:
-            lat = scene_description.location["center_lat"]
-            lon = scene_description.location["center_lon"]
-
-        # Delegate to IrradianceProcessor
-        return self.irradiance_processor.create_reference_disk_scene(
-            scene_description,
-            scene_dir,
-            lat,
-            lon,
-            height_offset,
-            disk_id="white_reference_disk_hdrf",
-        )
 
     def compute_h_reflectances(
         self,

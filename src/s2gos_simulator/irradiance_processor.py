@@ -6,6 +6,7 @@ Measures downward irradiance at BOA by:
 """
 
 import logging
+from dataclasses import replace
 from typing import Dict, Tuple
 
 import numpy as np
@@ -16,6 +17,28 @@ from upath import UPath
 logger = logging.getLogger(__name__)
 
 REFERENCE_DISK_RADIUS_M = 0.01  # 1cm radius for consistent BOA measurement
+
+
+def insert_reference_disk(
+    scene_description: SceneDescription,
+    x: float,
+    y: float,
+    z: float,
+    disk_id: str,
+    radius: float = REFERENCE_DISK_RADIUS_M,
+) -> tuple:
+    """Return a copy of scene_description with a white Lambertian disk inserted.
+
+    The disk has ρ=1.0 (white Lambertian material implied by type="disk").
+    Used for BOA irradiance (HDRF workflow) and BHR reference simulations.
+
+    Returns:
+        (modified scene, (x, y, z)) — coordinates passed through for convenience.
+    """
+    disk = {"object_id": disk_id, "type": "disk", "center": [x, y, z], "radius": radius}
+    new_objects = (scene_description.objects or []).copy()
+    new_objects.insert(0, disk)
+    return replace(scene_description, objects=new_objects), (x, y, z)
 
 
 class IrradianceProcessor:
@@ -89,8 +112,6 @@ class IrradianceProcessor:
 
         Returns modified scene and disk coordinates (x, y, z).
         """
-        from dataclasses import replace
-
         from s2gos_simulator.terrain_query import TerrainQuery
 
         if height_offset_m < 0:
@@ -127,21 +148,8 @@ class IrradianceProcessor:
             else:
                 z = location.target_z
 
-        # Create disk object
-        reference_disk = {
-            "object_id": disk_id,
-            "type": "disk",
-            "center": [x, y, z],
-            "radius": REFERENCE_DISK_RADIUS_M,
-        }
-
-        # Shallow copy scene with new objects list (avoid modifying original)
-        new_objects = (scene_description.objects or []).copy()
-        new_objects.insert(0, reference_disk)
-        disk_scene = replace(scene_description, objects=new_objects)
-
         logger.info(f"Created reference disk at ({x:.1f}, {y:.1f}, {z:.1f})")
-        return disk_scene, (x, y, z)
+        return insert_reference_disk(scene_description, x, y, z, disk_id=disk_id)
 
     def convert_radiance_to_irradiance(
         self,
