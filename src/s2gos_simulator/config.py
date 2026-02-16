@@ -1385,20 +1385,32 @@ class UAVSensor(BaseSensor):
     resolution: Optional[List[int]] = Field(None)
 
     @model_validator(mode="after")
-    def validate_and_set_defaults(self):
+    def validate_instrument_config(self):
+        """Ensures fields match the instrument type."""
         if self.instrument == UAVInstrumentType.PERSPECTIVE_CAMERA:
-            if not self.fov or not self.resolution:
-                print(
-                    "Warning: 'fov' and 'resolution' are recommended for a perspective_camera."
-                )
-        elif self.instrument == UAVInstrumentType.RADIANCEMETER:
-            if self.fov or self.resolution:
-                print(
-                    "Warning: 'fov' and 'resolution' are ignored for a 'radiancemeter'."
-                )
+            if self.fov is None or self.resolution is None:
+                print(f"Warning: UAV Sensor ({self.instrument.value}) is missing ")
 
+        elif self.instrument == UAVInstrumentType.RADIANCEMETER:
+            if self.fov is not None or self.resolution is not None:
+                print(
+                    f"Warning: 'fov' and 'resolution' are ignored for '{self.instrument.value}'. "
+                    "Setting them to None."
+                )
+                self.fov = None
+                self.resolution = None
+
+        return self
+
+    @model_validator(mode="after")
+    def generate_default_id(self):
+        """Auto-generates an ID based on instrument and altitude if missing."""
         if self.id is None:
-            self.id = f"uav_{self.instrument.value}_{int(self.viewing.origin[2])}m"
+            origin = getattr(self.viewing, "origin", [0, 0, 0])
+            z_height = int(origin[2])
+
+            self.id = f"uav_{self.instrument.value}_{z_height}m"
+
         return self
 
 
@@ -1591,42 +1603,48 @@ class GroundSensor(BaseSensor):
         description="HYPSTAR-specific post-processing (auto-enabled for HYPSTAR instrument)",
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def set_instrument_defaults(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+
+        inst = data.get("instrument")
+        is_hypstar = inst == GroundInstrumentType.HYPSTAR or inst == "HYPSTAR"
+
+        if is_hypstar:
+            if data.get("fov") is None:
+                print("Warning: HYPSTAR sensor missing 'fov'. Defaulting to 5.0°")
+                data["fov"] = 5.0
+
+            if data.get("resolution") is None:
+                print(
+                    "Warning: HYPSTAR sensor missing 'resolution'. Defaulting to [32, 32]"
+                )
+                data["resolution"] = [32, 32]
+
+            if data.get("hypstar_post_processing") is None:
+                data[
+                    "hypstar_post_processing"
+                ] = {}  # Pydantic will convert dict to Config object
+
+        return data
+
     @model_validator(mode="after")
-    def set_defaults_and_validate(self):
-        if self.instrument in [
+    def validate_compatibility_and_id(self):
+        camera_instruments = [
             GroundInstrumentType.HYPSTAR,
             GroundInstrumentType.PERSPECTIVE_CAMERA,
             GroundInstrumentType.DHP_CAMERA,
-        ]:
+        ]
+
+        if self.instrument in camera_instruments:
             if not isinstance(self.viewing, (LookAtViewing, AngularFromOriginViewing)):
                 raise ValueError(
                     f"'{self.instrument.value}' requires a pointing view "
                     f"('directional' or 'angular_from_origin'), not '{self.viewing.type}'."
                 )
 
-            # Warn if camera-like instruments don't have fov/resolution specified
-            if self.instrument == GroundInstrumentType.HYPSTAR:
-                if self.fov is None or self.resolution is None:
-                    print(
-                        f"Warning: HYPSTAR sensor '{self.id or 'unnamed'}' does not have 'fov' "
-                        f"and/or 'resolution' specified. Using defaults: fov=5.0°, resolution=[5, 5]"
-                    )
-
-                # Auto-enable HYPSTAR post-processing
-                if self.hypstar_post_processing is None:
-                    self.hypstar_post_processing = HypstarPostProcessingConfig()
-
-        elif self.instrument in [
-            GroundInstrumentType.PYRANOMETER,
-            GroundInstrumentType.FLUX_METER,
-        ]:
-            if not isinstance(self.viewing, HemisphericalViewing):
-                raise ValueError(
-                    f"'{self.instrument.value}' requires 'hemispherical' viewing, "
-                    f"not '{self.viewing.type}'."
-                )
-
-        # Auto-generate ID if not provided
         if self.id is None:
             if hasattr(self.viewing, "origin"):
                 self.id = (
@@ -1636,6 +1654,7 @@ class GroundSensor(BaseSensor):
                 self.id = f"ground_{self.instrument.value}_distant"
             else:
                 self.id = f"ground_{self.instrument.value}"
+
         return self
 
 
