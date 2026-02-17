@@ -33,17 +33,6 @@ class BRFProcessor:
         self.backend = backend
         self.simulation_config = backend.simulation_config
 
-    def requires_brf(self) -> bool:
-        """Check if any measurements require BRF computation.
-
-        Returns:
-            True if BRF computation is needed
-        """
-        for measurement in self.simulation_config.measurements:
-            if isinstance(measurement, BRFConfig):
-                return True
-        return False
-
     def get_brf_configs(self) -> List[BRFConfig]:
         """Get all BRF measurement configurations.
 

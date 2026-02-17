@@ -459,20 +459,7 @@ class SensorTranslator:
                 scene_dir=scene_dir,
             )
 
-        # Handle HYPSTAR special case with post-processing
-        if (
-            sensor.instrument == GroundInstrumentType.HYPSTAR
-            and sensor.hypstar_post_processing
-            and sensor.hypstar_post_processing.apply_srf
-        ):
-            simulation_srf = {
-                "type": "uniform",
-                "wmin": 380.0,
-                "wmax": 1680.0,
-                "value": 1.0,
-            }
-        else:
-            simulation_srf = self.translate_srf(sensor.srf)
+        simulation_srf = self.translate_srf(sensor.srf)
 
         base_measure = {
             "id": sanitize_sensor_id(sensor.id),
@@ -784,46 +771,42 @@ class SensorTranslator:
         elif srf.type == "dataset":
             return srf.dataset_id
         elif srf.type == "gaussian":
-            # Gaussian SRF: use uniform for simulation, apply convolution in post-processing
-            # This is much more efficient than running per-wavelength simulations
-            grid = srf.output_grid
-            if grid.mode == "regular":
-                wmin = grid.wmin_nm
-                wmax = grid.wmax_nm
-            elif grid.mode == "explicit":
-                wmin = min(grid.wavelengths_nm)
-                wmax = max(grid.wavelengths_nm)
+            # Gaussian SRF: simulate uniformly over the spectral range,
+            # then apply Gaussian SRF convolution in post-processing.
+            if srf.output_grid is not None:
+                grid = srf.output_grid
+                if grid.mode == "regular":
+                    wmin = grid.wmin_nm
+                    wmax = grid.wmax_nm
+                elif grid.mode == "explicit":
+                    wmin = min(grid.wavelengths_nm)
+                    wmax = max(grid.wavelengths_nm)
+                else:
+                    # from_file: wavelengths only known at runtime; derive
+                    # simulation range from spectral_regions if present.
+                    if srf.spectral_regions:
+                        wmin = min(r.wmin_nm for r in srf.spectral_regions)
+                        wmax = max(r.wmax_nm for r in srf.spectral_regions)
+                    else:
+                        wmin = 400.0
+                        wmax = 2500.0
+                    logger.debug(
+                        f"Gaussian SRF with from_file output grid: using "
+                        f"{wmin}–{wmax} nm for simulation (from spectral_regions)."
+                    )
+            elif srf.spectral_regions:
+                # Infer simulation range from spectral region bounds
+                wmin = min(r.wmin_nm for r in srf.spectral_regions)
+                wmax = max(r.wmax_nm for r in srf.spectral_regions)
             else:
-                # For from_file mode, fall back to common hyperspectral range
-                wmin = 400.0
-                wmax = 2500.0
-                logger.warning(
-                    f"Gaussian SRF with from_file grid: using default range {wmin}-{wmax}nm for simulation. "
-                    f"Consider specifying explicit wavelength range."
-                )
+                wmin, wmax = 400.0, 2500.0  # broad fallback
             return {
                 "type": "uniform",
                 "wmin": wmin,
                 "wmax": wmax,
             }
-        elif srf.type == "platform":
-            return self.resolve_platform_srf(srf.platform, srf.instrument, srf.band)
         else:
             raise ValueError(f"Unsupported SRF type: {srf.type}")
-
-    def resolve_platform_srf(self, platform: str, instrument: str, band: str) -> str:
-        """Resolve platform/instrument/band combination to Eradiate SRF identifier.
-
-        Args:
-            platform: Platform name
-            instrument: Instrument name
-            band: Band name
-
-        Returns:
-            Eradiate SRF identifier string
-        """
-        srf_id = f"{platform.lower()}_{instrument.lower()}_{band.lower()}"
-        return srf_id
 
     def generate_radiance_sensor_for_hdrf(
         self, hdrf_config: HDRFConfig

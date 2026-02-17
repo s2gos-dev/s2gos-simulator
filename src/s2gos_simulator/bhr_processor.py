@@ -7,8 +7,6 @@ This uses Eradiate's distant_flux measure type which outputs radiosity
 (power per unit area), not radiance. The workflow requires two simulations:
 1. Surface simulation: measures radiosity reflected from the actual surface
 2. Reference simulation: measures radiosity from a white Lambertian disk (ρ=1.0)
-
-The ratio gives BHR directly without π normalization (unlike HDRF).
 """
 
 import logging
@@ -45,17 +43,6 @@ class BHRProcessor:
         self.backend = backend
         self.simulation_config = backend.simulation_config
 
-    def requires_bhr(self) -> bool:
-        """Check if any measurements require BHR computation.
-
-        Returns:
-            True if BHR computation is needed
-        """
-        for measurement in self.simulation_config.measurements:
-            if isinstance(measurement, BHRConfig):
-                return True
-        return False
-
     def get_bhr_configs(self) -> List[BHRConfig]:
         """Get all BHR measurement configurations.
 
@@ -65,14 +52,6 @@ class BHRProcessor:
         return [
             m for m in self.simulation_config.measurements if isinstance(m, BHRConfig)
         ]
-
-    def get_bhr_measure_ids(self) -> List[str]:
-        """Get list of measure IDs for BHR measurements.
-
-        Returns:
-            List of measure IDs (sanitized for Eradiate)
-        """
-        return [config.id.replace(".", "_") for config in self.get_bhr_configs()]
 
     def _to_scene_coords(
         self, lat: float, lon: float, scene: SceneDescription
@@ -281,8 +260,10 @@ class BHRProcessor:
 
                 # Step 1: Surface simulation
                 logger.info("  Step 1: Running surface radiosity simulation...")
-                surface_measure = self.backend.sensor_translator.create_distant_flux_measure(
-                    bhr_config, target_coords, is_reference=False
+                surface_measure = (
+                    self.backend.sensor_translator.create_distant_flux_measure(
+                        bhr_config, target_coords, is_reference=False
+                    )
                 )
                 surface_experiment = self.backend._create_experiment(
                     scene_description, scene_dir, measures=[surface_measure]
@@ -306,8 +287,10 @@ class BHRProcessor:
                     scene_description, scene_dir, bhr_config
                 )
 
-                ref_measure = self.backend.sensor_translator.create_distant_flux_measure(
-                    bhr_config, disk_coords, is_reference=True
+                ref_measure = (
+                    self.backend.sensor_translator.create_distant_flux_measure(
+                        bhr_config, disk_coords, is_reference=True
+                    )
                 )
                 ref_experiment = self.backend._create_experiment(
                     ref_scene, scene_dir, measures=[ref_measure]

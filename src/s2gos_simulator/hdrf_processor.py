@@ -1,10 +1,10 @@
 import logging
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List
 
 import xarray as xr
 from upath import UPath
 
-from .backends.eradiate.reflectance_computation import compute_hdrf, compute_hcrf
+from .backends.eradiate.reflectance_computation import compute_hcrf, compute_hdrf
 from .config import HCRFConfig, HDRFConfig
 from .irradiance_processor import IrradianceProcessor
 
@@ -72,51 +72,6 @@ class HDRFProcessor:
             ID string for the measurement
         """
         return measurement.id
-
-    def _get_hdrf_config_for_measure(
-        self, measure_id: str
-    ) -> Optional[Tuple[float, float, float]]:
-        """Get target location and height offset for an HDRF measure.
-
-        Args:
-            measure_id: HDRF measure ID
-
-        Returns:
-            Tuple of (target_lat, target_lon, height_offset_m) or None if not found.
-            Returns (None, None, height_offset) if location uses scene coordinates
-            instead of lat/lon.
-        """
-        from .config import HDRFConfig
-
-        for measurement in self.simulation_config.measurements:
-            if isinstance(measurement, HDRFConfig):
-                hdrf_id = self._get_hdrf_id(measurement)
-
-                if hdrf_id.replace(".", "_") == measure_id:
-                    # Extract location based on instrument type
-                    target_lat = None
-                    target_lon = None
-
-                    if (
-                        measurement.instrument == "hemispherical"
-                        and measurement.location
-                    ):
-                        # Hemispherical HDRF uses location-based pattern
-                        target_lat = measurement.location.target_lat
-                        target_lon = measurement.location.target_lon
-                    elif measurement.viewing:
-                        # Radiancemeter uses viewing geometry - try to get target lat/lon
-                        # Note: viewing.target is in scene coordinates, not lat/lon
-                        # We'll return None and let caller fall back to scene center
-                        pass
-
-                    return (
-                        target_lat,
-                        target_lon,
-                        measurement.reference_height_offset_m,
-                    )
-
-        return None
 
     def compute_h_reflectances(
         self,

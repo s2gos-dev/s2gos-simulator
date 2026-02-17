@@ -6,7 +6,7 @@ from typing import Annotated, Any, Dict, List, Literal, Optional, Tuple, Union
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 from s2gos_utils import validate_config_version
-from s2gos_utils.io.paths import PathRef, open_file, read_json
+from s2gos_utils.io.paths import open_file, read_json
 from s2gos_utils.io.resolver import resolver
 from s2gos_utils.typing import PathLike
 from skyfield.api import load, wgs84
@@ -247,7 +247,8 @@ class WavelengthGrid(BaseModel):
         elif self.mode == "from_file":
             import xarray as xr
 
-            ds = xr.open_dataset(self.file_path)
+            resolved_path = resolver.resolve(self.file_path, strict=True)
+            ds = xr.open_dataset(resolved_path)
             return ds[self.wavelength_variable].values
         else:
             raise ValueError(f"Unknown mode: {self.mode}")
@@ -332,8 +333,6 @@ class SpectralResponse(BaseModel):
                 raise ValueError("Gaussian SRF requires fwhm_nm OR spectral_regions")
             if has_single_fwhm and has_regions:
                 raise ValueError("Specify fwhm_nm OR spectral_regions, not both")
-            if not self.output_grid:
-                raise ValueError("Gaussian SRF requires output_grid configuration")
         return self
 
     def get_fwhm_for_wavelength(self, wavelength_nm: float) -> float:
@@ -940,54 +939,8 @@ class PixelBHRConfig(BasePixelMeasurementConfig):
     )
 
 
-class HCRFPostProcessingConfig(BaseModel):
-    """Post-processing configuration for HCRF measurements.
-
-    HCRF produces images (wavelength × x_index × y_index) which can be
-    post-processed in various ways before final analysis.
-    """
-
-    # Spectral response function convolution
-    apply_srf_convolution: bool = Field(
-        False,
-        description="Apply Gaussian SRF convolution to spectral data",
-    )
-    srf_fwhm_nm: Optional[float] = Field(
-        None,
-        gt=0.0,
-        description="Full Width at Half Maximum for Gaussian SRF (nm). Common values: HYPSTAR VNIR=3.0, SWIR=10.0",
-    )
-
-    # Spatial averaging over FOV
-    compute_spatial_average: bool = Field(
-        True,
-        description="Average HCRF values over spatial dimensions (FOV pixels)",
-    )
-    spatial_statistic: Literal["mean", "median"] = Field(
-        "mean",
-        description="Statistic to use for spatial averaging",
-    )
-
-    # RGB visualization
-    create_rgb_image: bool = Field(
-        False,
-        description="Generate RGB image from spectral data",
-    )
-    rgb_wavelengths_nm: Tuple[float, float, float] = Field(
-        (660.0, 550.0, 440.0),
-        description="Wavelengths (nm) to use for RGB channels [R, G, B]",
-    )
-    rgb_scaling_factors: Tuple[float, float, float] = Field(
-        (1.0, 1.0, 1.0),
-        description="Scaling factors for RGB channels",
-    )
-
-
 class HCRFConfig(BaseModel):
     """Configuration for Hemispherical-Conical Reflectance Factor (HCRF).
-
-    HCRF is a **purely ideal, theoretical measurement** that captures the ratio
-    of radiance within a conical field of view to BOA irradiance.
 
     Two modes:
     1. Reference mode: Specify radiance_sensor_id + irradiance_measurement_id
@@ -1025,9 +978,6 @@ class HCRFConfig(BaseModel):
     )
     samples_per_pixel: int = Field(64, description="Samples per pixel")
     terrain_relative_height: bool = Field(True, description="Terrain-relative height")
-    post_processing: Optional[HCRFPostProcessingConfig] = Field(
-        None, description="Post-processing configuration"
-    )
 
     @model_validator(mode="after")
     def validate_hcrf_mode(self):
@@ -1182,19 +1132,6 @@ class HemisphericalMeasurementLocation(BaseModel):
         return self
 
 
-class RadianceConfig(HemisphericalMeasurementLocation):
-    """Configuration for simple spectral radiance measurement.
-
-    Measures upward radiance at a specific location without normalization.
-    """
-
-    type: Literal["radiance"] = "radiance"
-    id: Optional[str] = Field(
-        None,
-        description="Unique identifier",
-    )
-
-
 class BHRConfig(HemisphericalMeasurementLocation):
     """Configuration for Bi-Hemispherical Reflectance (BHR) measurement.
 
@@ -1226,7 +1163,6 @@ MeasurementConfig = Annotated[
         PixelHDRFConfig,
         PixelBRFConfig,
         PixelBHRConfig,
-        RadianceConfig,
         BHRConfig,
     ],
     Field(discriminator="type"),
@@ -1242,6 +1178,23 @@ class BaseSensor(BaseModel):
     platform_type: PlatformType
     viewing: ViewingType
     srf: Optional[SRFType] = Field(None, description="Spectral response function")
+
+    @field_validator("srf", mode="before")
+    @classmethod
+    def resolve_srf_preset(cls, v):
+        if not isinstance(v, str):
+            return v
+
+        presets = {
+            "hypstar": lambda: HYPSTAR_SRF,
+            "chime": lambda: CHIME_SRF,
+        }
+
+        if v in presets:
+            return presets[v]()
+
+        return v
+
     produces: List[Literal["radiance", "irradiance", "hdrf", "brf", "bhr"]] = Field(
         ["radiance"],
         description="List of radiative quantities to be produced by this sensor configuration",
@@ -1415,49 +1368,13 @@ class UAVSensor(BaseSensor):
 
 
 class SRFPostProcessingConfig(BaseModel):
-    """Base configuration for Gaussian SRF post-processing.
+    """Base configuration for SRF post-processing pipeline steps.
 
-    This provides a common pattern for instruments that need
-    post-processing SRF application (e.g., HYPSTAR, other spectrometers).
-
-    Instruments can specify either:
-    - Wavelength-dependent FWHM (vnir + swir) for different spectral ranges
-    - Single FWHM for all wavelengths
-
-    Example:
-        # Wavelength-dependent (HYPSTAR-like)
-        config = SRFPostProcessingConfig(
-            apply_srf=True,
-            fwhm_vnir_nm=3.0,
-            fwhm_swir_nm=10.0
-        )
-
-        # Single FWHM (simpler instruments)
-        config = SRFPostProcessingConfig(
-            apply_srf=True,
-            fwhm_nm=5.0
-        )
+    FWHM is expressed on sensor.srf (SpectralResponse with spectral_regions),
+    not here. This class controls which pipeline steps to execute.
     """
 
     apply_srf: bool = Field(default=True, description="Apply Gaussian SRF convolution")
-
-    # Option 1: Wavelength-dependent FWHM (like HYPSTAR)
-    fwhm_vnir_nm: Optional[float] = Field(
-        default=None, gt=0.0, description="FWHM for VNIR range (<1000 nm) in nanometers"
-    )
-    fwhm_swir_nm: Optional[float] = Field(
-        default=None,
-        gt=0.0,
-        description="FWHM for SWIR range (>=1000 nm) in nanometers",
-    )
-
-    # Option 2: Single FWHM for all wavelengths
-    fwhm_nm: Optional[float] = Field(
-        default=None,
-        gt=0.0,
-        description="Single FWHM for all wavelengths in nanometers",
-    )
-
     spatial_averaging: bool = Field(
         default=True, description="Average over spatial dimensions (x_index, y_index)"
     )
@@ -1465,74 +1382,14 @@ class SRFPostProcessingConfig(BaseModel):
         default="mean", description="Statistic for spatial averaging"
     )
 
-    @model_validator(mode="after")
-    def validate_fwhm(self):
-        """Ensure at least one FWHM is specified when SRF is enabled."""
-        if not self.apply_srf:
-            return self
-
-        has_dual = self.fwhm_vnir_nm is not None and self.fwhm_swir_nm is not None
-        has_single = self.fwhm_nm is not None
-
-        if not (has_dual or has_single):
-            raise ValueError(
-                "Must specify either (fwhm_vnir_nm + fwhm_swir_nm) or fwhm_nm when apply_srf=True"
-            )
-
-        if has_dual and has_single:
-            raise ValueError(
-                "Specify either dual FWHM (vnir+swir) OR single FWHM, not both"
-            )
-
-        return self
-
 
 class HypstarPostProcessingConfig(SRFPostProcessingConfig):
     """Post-processing configuration for HYPSTAR sensor.
 
-    HYPSTAR is a real instrument with specific spectral characteristics.
-    This configuration inherits from SRFPostProcessingConfig and provides
-    HYPSTAR-specific defaults for SRF convolution.
-
-    For validation against real HYPSTAR observations, specify real_reference_file
-    to interpolate simulation results to HYPSTAR's exact wavelength grid.
-
-    Default HYPSTAR characteristics:
-    - VNIR FWHM: 3.0 nm (wavelength < 1000 nm)
-    - SWIR FWHM: 10.0 nm (wavelength >= 1000 nm)
-    - Spatial averaging: enabled
-
     Example:
-        # Basic usage (simulation wavelengths)
+        # Basic usage (simulation wavelengths, SRF from sensor.srf)
         config = HypstarPostProcessingConfig()
-
-        # Validation mode (interpolate to reference wavelengths)
-        config = HypstarPostProcessingConfig(
-            real_reference_file="HYPERNETS_L_GHNA_L2A_REF_*.nc"
-        )
     """
-
-    fwhm_vnir_nm: float = Field(
-        default=3.0, gt=0.0, description="HYPSTAR VNIR FWHM (default 3.0 nm)"
-    )
-    fwhm_swir_nm: float = Field(
-        default=10.0, gt=0.0, description="HYPSTAR SWIR FWHM (default 10.0 nm)"
-    )
-
-    real_reference_file: Optional[PathRef] = Field(
-        default=None,
-        description=(
-            "Path to HYPSTAR reference NetCDF file for wavelength grid reference. "
-            "If provided, SRF processing will interpolate to the reference wavelengths "
-            "instead of simulation wavelengths. This is required for validation "
-            "against real HYPSTAR observations to ensure wavelength grids match. "
-            "Example: 'HYPERNETS_L_GHNA_L2A_REF_20220517T0743_*.nc'"
-        ),
-    )
-    wavelength_variable: str = Field(
-        default="wavelength",
-        description="Variable name for wavelengths in reference file",
-    )
 
     apply_circular_mask: bool = Field(
         default=True,
@@ -1562,15 +1419,6 @@ class HypstarPostProcessingConfig(SRFPostProcessingConfig):
         gt=0.0,
         description="Brightness multiplier for RGB visualization",
     )
-
-    @field_validator("real_reference_file", mode="before")
-    @classmethod
-    def validate_real_reference_file(cls, v):
-        """Validate and resolve real reference."""
-        if v is None:
-            return None
-        resolved = PathRef(resolver.resolve(v, strict=True), cid=v.cid)
-        return resolved
 
 
 class GroundInstrumentType(str, Enum):
@@ -1606,6 +1454,10 @@ class GroundSensor(BaseSensor):
     @model_validator(mode="before")
     @classmethod
     def set_instrument_defaults(cls, data: Any) -> Any:
+        import logging
+
+        logger = logging.getLogger(__name__)
+
         if not isinstance(data, dict):
             return data
 
@@ -1614,12 +1466,12 @@ class GroundSensor(BaseSensor):
 
         if is_hypstar:
             if data.get("fov") is None:
-                print("Warning: HYPSTAR sensor missing 'fov'. Defaulting to 5.0°")
+                logger.warning("HYPSTAR sensor missing 'fov'. Defaulting to 5.0°")
                 data["fov"] = 5.0
 
             if data.get("resolution") is None:
-                print(
-                    "Warning: HYPSTAR sensor missing 'resolution'. Defaulting to [32, 32]"
+                logger.warning(
+                    "HYPSTAR sensor missing 'resolution'. Defaulting to [32, 32]"
                 )
                 data["resolution"] = [32, 32]
 
@@ -1627,6 +1479,12 @@ class GroundSensor(BaseSensor):
                 data[
                     "hypstar_post_processing"
                 ] = {}  # Pydantic will convert dict to Config object
+
+            if data.get("srf") is None:
+                data["srf"] = SpectralResponse(
+                    type="gaussian",
+                    spectral_regions=HYPSTAR_SPECTRAL_REGIONS,
+                )
 
         return data
 
@@ -1666,12 +1524,8 @@ class ProcessingConfig(BaseModel):
     )
 
 
-# =============================================================================
-# CHIME Hyperspectral Satellite Support
-# =============================================================================
-
 # CHIME (Copernicus Hyperspectral Imaging Mission) spectral characteristics
-# Based on ESA specifications:
+# Based on early ESA specifications:
 # - Spectral range: 400-2500 nm
 # - Spectral resolution: < 11 nm (worst case at FOV edge)
 # - Spectral Sampling Interval (SSI): 8.4 nm
@@ -1683,14 +1537,24 @@ CHIME_SPECTRAL_REGIONS = [
     SpectralRegion(name="SWIR2", wmin_nm=1800.0, wmax_nm=2500.0, fwhm_nm=11.0),
 ]
 
-CHIME_SPECTRAL_CONFIG = {
-    "wmin_nm": 400.0,
-    "wmax_nm": 2500.0,
-    "ssi_nm": 8.4,  # Spectral Sampling Interval
-    "spatial_resolution_m": 30.0,
-    "swath_km": 130.0,
-    "spectral_regions": CHIME_SPECTRAL_REGIONS,
-}
+CHIME_SRF = SpectralResponse(
+    type="gaussian",
+    spectral_regions=CHIME_SPECTRAL_REGIONS,
+    output_grid=WavelengthGrid(mode="regular", wmin_nm=400, wmax_nm=2500, step_nm=8.4),
+)
+
+# HYPSTAR (HYPERNETS Land Network) spectral characteristics
+# - VNIR detector (Si): 380–1000 nm, FWHM ≈ 3 nm
+# - SWIR detector (InGaAs): 1000–1680 nm, FWHM ≈ 10 nm
+HYPSTAR_SPECTRAL_REGIONS = [
+    SpectralRegion(name="VNIR", wmin_nm=380.0, wmax_nm=1000.0, fwhm_nm=3.0),
+    SpectralRegion(name="SWIR", wmin_nm=1000.0, wmax_nm=1680.0, fwhm_nm=10.0),
+]
+
+HYPSTAR_SRF = SpectralResponse(
+    type="gaussian",
+    spectral_regions=HYPSTAR_SPECTRAL_REGIONS,
+)
 
 
 def create_chime_sensor(
@@ -1774,6 +1638,65 @@ def create_chime_sensor(
         target_center_lon=target_center_lon,
         target_size_km=adjusted_target_size,
         samples_per_pixel=samples_per_pixel,
+        srf=srf,
+        **kwargs,
+    )
+
+
+def create_hypstar_sensor(
+    viewing: Union[LookAtViewing, AngularFromOriginViewing],
+    fov: float = 5.0,
+    resolution: tuple[int, int] = (32, 32),
+    reference_file: Optional[str] = None,
+    wavelength_variable: str = "wavelength",
+    sensor_id: Optional[str] = None,
+    **kwargs,
+) -> GroundSensor:
+    """Create a HYPSTAR ground sensor.
+
+    HYPSTAR (HYPERNETS Land Network) specifications:
+    - VNIR detector (Si): 380–1000 nm, FWHM ≈ 3 nm
+    - SWIR detector (InGaAs): 1000–1680 nm, FWHM ≈ 10 nm
+
+    When reference_file is provided, SRF post-processing outputs wavelengths
+    from that file (for direct comparison against real HYPSTAR observations).
+    Without it, simulation wavelengths are used.
+
+    Args:
+        viewing: Pointing configuration (LookAtViewing or AngularFromOriginViewing)
+        fov: Field of view in degrees. Default 5.0 (HYPSTAR default)
+        resolution: Film resolution [width, height]. Default (32, 32)
+        reference_file: Path to HYPERNETS L2A NetCDF file. If provided, SRF
+            post-processing will output at the file's wavelength grid.
+        wavelength_variable: Variable name for wavelengths in reference file
+        sensor_id: Optional sensor ID. Auto-generated if not provided
+        **kwargs: Additional GroundSensor parameters
+
+    Returns:
+        GroundSensor configured for HYPSTAR simulation
+    """
+    output_grid = None
+    if reference_file is not None:
+        output_grid = WavelengthGrid(
+            mode="from_file",
+            file_path=reference_file,
+            wavelength_variable=wavelength_variable,
+        )
+
+    srf = SpectralResponse(
+        type="gaussian",
+        spectral_regions=HYPSTAR_SPECTRAL_REGIONS,
+        output_grid=output_grid,
+    )
+
+    kwargs.setdefault("hypstar_post_processing", HypstarPostProcessingConfig())
+
+    return GroundSensor(
+        id=sensor_id,
+        instrument=GroundInstrumentType.HYPSTAR,
+        viewing=viewing,
+        fov=fov,
+        resolution=list(resolution),
         srf=srf,
         **kwargs,
     )
