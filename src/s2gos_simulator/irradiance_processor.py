@@ -221,12 +221,12 @@ class IrradianceProcessor:
             disk_coords[config.id] = coords
             disk_scenes[config.id] = disk_scene
 
-        self.backend.irradiance_disk_coords = disk_coords
-
         for config in irradiance_configs:
             disk_scene = disk_scenes[config.id]
 
-            experiment = self.backend._create_experiment(disk_scene, scene_dir)
+            experiment = self.backend.create_experiment(
+                disk_scene, scene_dir, irradiance_disk_coords=disk_coords
+            )
 
             measure_map = {
                 getattr(m, "id", f"measure_{i}"): i

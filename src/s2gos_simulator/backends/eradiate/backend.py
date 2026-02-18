@@ -5,7 +5,7 @@ for geometry, atmosphere, surfaces, sensors, and result processing.
 """
 
 import logging
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import xarray as xr
 from s2gos_utils.scene import SceneDescription
@@ -81,14 +81,13 @@ class EradiateBackend(SimulationBackend):
         self.atmosphere_builder = AtmosphereBuilder()
         self.surface_builder = SurfaceBuilder()
         self.sensor_translator = SensorTranslator(
-            simulation_config, self.geometry_utils, backend=self
+            simulation_config, self.geometry_utils
         )
         self.result_processor = ResultProcessor(simulation_config)
         self.sensor_processor = SensorProcessor(simulation_config)
 
         self._current_scene_dir = None
         self._current_scene_description = None
-        self.irradiance_disk_coords: dict[str, tuple[float, float, float]] = {}
 
     def is_available(self) -> bool:
         """Check if Eradiate dependencies are available.
@@ -338,7 +337,7 @@ class EradiateBackend(SimulationBackend):
 
         This is NOT used for BRF (no atmosphere), that is handled by `_run_brf_workflow`.
         NOT used for BOA irradiance measurements, that is handled by `IrradianceProcessor`
-        Atmosphere is built from scene description via `_create_experiment(atmosphere="auto")`.
+        Atmosphere is built from scene description via `create_experiment(atmosphere="auto")`.
 
         Args:
             scene_description: Scene description
@@ -355,7 +354,7 @@ class EradiateBackend(SimulationBackend):
         logger.info("=" * 60)
         logger.info("Running experiments")
         logger.info("=" * 60)
-        experiment = self._create_experiment(
+        experiment = self.create_experiment(
             scene_description,
             scene_dir,
             include_irradiance_measures,
@@ -446,10 +445,9 @@ class EradiateBackend(SimulationBackend):
             **kwargs,
         )
 
-        irr_results, disk_coords = irradiance_processor.execute_irradiance_measurements(
+        irr_results, _ = irradiance_processor.execute_irradiance_measurements(
             scene_description, scene_dir, output_dir / "boa_irradiance"
         )
-        self.irradiance_disk_coords = disk_coords
 
         combined_results = {**sensor_results, **irr_results}
 
@@ -506,7 +504,7 @@ class EradiateBackend(SimulationBackend):
 
         brf_sensor_ids = brf_proc.get_brf_sensor_ids()
 
-        experiment = self._create_experiment(
+        experiment = self.create_experiment(
             scene_description,
             scene_dir,
             include_irradiance_measures=False,
@@ -561,7 +559,7 @@ class EradiateBackend(SimulationBackend):
         logger.info(f"\nBRF workflow complete: {len(brf_results)} BRF measurements")
         return all_results
 
-    def _create_experiment(
+    def create_experiment(
         self,
         scene_description: SceneDescription,
         scene_dir: UPath,
@@ -569,6 +567,7 @@ class EradiateBackend(SimulationBackend):
         atmosphere: Optional[str] = "auto",
         sensor_ids: Optional[set] = None,
         measures: Optional[list] = None,
+        irradiance_disk_coords: Optional[Dict[str, tuple]] = None,
     ):
         """Create Eradiate experiment from scene description.
 
@@ -586,6 +585,9 @@ class EradiateBackend(SimulationBackend):
                 translate_sensors() is bypassed and these measures are used directly.
                 include_irradiance_measures and sensor_ids are ignored.
                 Use this when the caller owns measure construction (e.g. BHR distant_flux).
+            irradiance_disk_coords: Optional mapping of IrradianceConfig ID to
+                (x, y, z) disk coordinates. Passed through to translate_sensors()
+                when measures is None.
 
         Returns:
             AtmosphereExperiment configured for the scene
@@ -648,7 +650,8 @@ class EradiateBackend(SimulationBackend):
 
         if measures is None:
             measures = self.sensor_translator.translate_sensors(
-                scene_description, scene_dir, include_irradiance_measures, sensor_ids
+                scene_description, scene_dir, include_irradiance_measures, sensor_ids,
+                irradiance_disk_coords=irradiance_disk_coords,
             )
 
         logger.debug(

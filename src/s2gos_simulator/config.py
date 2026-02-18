@@ -1339,14 +1339,20 @@ class UAVSensor(BaseSensor):
 
     @model_validator(mode="after")
     def validate_instrument_config(self):
+        import logging
+
+        logger = logging.getLogger(__name__)
+
         """Ensures fields match the instrument type."""
         if self.instrument == UAVInstrumentType.PERSPECTIVE_CAMERA:
             if self.fov is None or self.resolution is None:
-                print(f"Warning: UAV Sensor ({self.instrument.value}) is missing ")
+                logger.warning(
+                    f"Warning: UAV Sensor ({self.instrument.value}) is missing "
+                )
 
         elif self.instrument == UAVInstrumentType.RADIANCEMETER:
             if self.fov is not None or self.resolution is not None:
-                print(
+                logger.warning(
                     f"Warning: 'fov' and 'resolution' are ignored for '{self.instrument.value}'. "
                     "Setting them to None."
                 )

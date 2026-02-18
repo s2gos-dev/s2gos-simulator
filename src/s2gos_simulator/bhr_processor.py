@@ -265,7 +265,7 @@ class BHRProcessor:
                         bhr_config, target_coords, is_reference=False
                     )
                 )
-                surface_experiment = self.backend._create_experiment(
+                surface_experiment = self.backend.create_experiment(
                     scene_description, scene_dir, measures=[surface_measure]
                 )
 
@@ -292,7 +292,7 @@ class BHRProcessor:
                         bhr_config, disk_coords, is_reference=True
                     )
                 )
-                ref_experiment = self.backend._create_experiment(
+                ref_experiment = self.backend.create_experiment(
                     ref_scene, scene_dir, measures=[ref_measure]
                 )
 

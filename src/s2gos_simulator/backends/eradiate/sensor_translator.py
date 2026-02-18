@@ -61,17 +61,15 @@ class _AssetTransform(NamedTuple):
 class SensorTranslator:
     """Translator for sensors, measurements, and derived quantities."""
 
-    def __init__(self, simulation_config, geometry_utils, backend=None):
+    def __init__(self, simulation_config, geometry_utils):
         """Initialize sensor translator.
 
         Args:
             simulation_config: SimulationConfig object
             geometry_utils: GeometryUtils instance for coordinate operations
-            backend: Optional backend instance for accessing shared state (e.g., disk_coords)
         """
         self.simulation_config = simulation_config
         self.geometry_utils = geometry_utils
-        self.backend = backend
         self._current_scene_description = None
         self._current_scene_dir = None
 
@@ -215,6 +213,7 @@ class SensorTranslator:
         scene_dir: UPath,
         include_irradiance_measures: bool = True,
         sensor_ids: Optional[Set[str]] = None,
+        irradiance_disk_coords: Optional[Dict[str, tuple]] = None,
     ) -> List[Dict[str, Any]]:
         """Translate generic sensors and measurements to Eradiate measures.
 
@@ -225,6 +224,9 @@ class SensorTranslator:
             sensor_ids: Optional set of sensor IDs to include. If None, all sensors
                 are included. Use this to filter sensors for specific workflows
                 (e.g., only BRF sensors for BRF workflow).
+            irradiance_disk_coords: Optional mapping of IrradianceConfig ID to
+                (x, y, z) disk coordinates. Required when include_irradiance_measures
+                is True and IrradianceConfig measurements are present.
 
         Returns:
             List of Eradiate measure dictionaries
@@ -271,23 +273,18 @@ class SensorTranslator:
                 raise ValueError(f"Unsupported sensor type: {type(sensor)}")
 
         if include_irradiance_measures:
+            coords_map = irradiance_disk_coords or {}
             for measurement in self.simulation_config.measurements:
                 if isinstance(measurement, IrradianceConfig):
-                    if self.backend is None:
-                        raise RuntimeError(
-                            f"Cannot create irradiance measure '{measurement.id}': "
-                            f"No backend attached to SensorTranslator."
-                        )
-
-                    disk_coords = self.backend.irradiance_disk_coords.get(
-                        measurement.id
-                    )
+                    disk_coords = coords_map.get(measurement.id)
                     if disk_coords is None:
-                        raise RuntimeError(
-                            f"Disk coordinates not found for irradiance measurement '{measurement.id}'. "
-                            f"Available measurements: {list(self.backend.irradiance_disk_coords.keys())}"
+                        # Disk coords not yet available (e.g. called before irradiance
+                        # simulation has run, or from a workflow that doesn't use irradiance).
+                        logger.debug(
+                            f"Skipping irradiance measure '{measurement.id}': "
+                            f"no disk coordinates provided."
                         )
-
+                        continue
                     measures.append(
                         self.create_irradiance_measure(measurement, disk_coords)
                     )
