@@ -1,11 +1,15 @@
 from __future__ import annotations
 
-from typing import Annotated, Any, Dict, List, Literal, Optional, Set, Tuple, Union
+from typing import Annotated, List, Literal, Optional, Tuple, Union
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from .spectral import SpectralResponse, SRFType
-from .viewing import AngularFromOriginViewing, DistantViewing, LookAtViewing, RectangleTarget
+from .spectral import SRFType
+from .viewing import (
+    AngularFromOriginViewing,
+    DistantViewing,
+    LookAtViewing,
+)
 
 
 class HemisphericalMeasurementLocation(BaseModel):

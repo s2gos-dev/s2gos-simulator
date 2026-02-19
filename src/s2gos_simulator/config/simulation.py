@@ -9,7 +9,6 @@ from s2gos_utils import validate_config_version
 from s2gos_utils.io.paths import open_file, read_json
 from s2gos_utils.typing import PathLike
 
-from .._version import get_version
 from .illumination import ConstantIllumination, DirectionalIllumination
 from .measurements import (
     BRFConfig,
@@ -22,6 +21,7 @@ from .measurements import (
 )
 from .sensors import GroundSensor, SatelliteSensor, UAVSensor
 from .spectral import SpectralResponse
+from .._version import get_version
 
 
 class ProcessingLevel(str, Enum):
