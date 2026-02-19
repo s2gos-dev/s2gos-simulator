@@ -4,7 +4,13 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional, Union
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 from s2gos_utils import validate_config_version
 from s2gos_utils.io.paths import open_file, read_json
 from s2gos_utils.typing import PathLike
@@ -90,8 +96,11 @@ class SimulationConfig(BaseModel):
     model_config = {
         "validate_assignment": True,
         "extra": "forbid",
-        "json_encoders": {datetime: lambda v: v.isoformat()},
     }
+
+    @field_serializer("created_at", when_used="json")
+    def serialize_datetime_iso(self, created_at: datetime):
+        return created_at.isoformat()
 
     @field_validator("sensors")
     @classmethod
