@@ -1,12 +1,9 @@
 """Reflectance computation for BRF, HDRF, HCRF, and BHR."""
 
-import logging
 from typing import Literal, Optional
 
 import numpy as np
 import xarray as xr
-
-logger = logging.getLogger(__name__)
 
 ReflectanceType = Literal["hdrf", "hcrf", "brf", "bhr"]
 
@@ -15,6 +12,7 @@ def align_and_broadcast_datasets(
     radiance: xr.DataArray,
     reference: xr.DataArray,
     wavelength_dim: str = "w",
+    fill_value: float | None = None,
 ) -> tuple[xr.DataArray, xr.DataArray]:
     """Align wavelength dimensions and broadcast reference to match radiance shape.
 
@@ -26,6 +24,8 @@ def align_and_broadcast_datasets(
         radiance: Radiance DataArray (L)
         reference: Reference DataArray (E for irradiance, or similar)
         wavelength_dim: Name of the wavelength dimension (default: "w")
+        fill_value: Value to use for out-of-range wavelengths. If None (default),
+            raises ValueError when radiance extends beyond the reference range.
 
     Returns:
         Tuple of (radiance, aligned_reference) DataArrays
@@ -43,15 +43,24 @@ def align_and_broadcast_datasets(
                 float(reference[wavelength_dim].max()),
             )
 
-            if rad_min < ref_min or rad_max > ref_max:
-                logger.warning(
-                    f"Radiance wavelength range [{rad_min}, {rad_max}] nm extends beyond "
-                    f"reference range [{ref_min}, {ref_max}] nm. "
-                    f"Edge wavelengths will be NaN after interpolation."
-                )
+            out_of_range = rad_min < ref_min or rad_max > ref_max
+
+            if out_of_range:
+                if fill_value is None:
+                    raise ValueError(
+                        f"Radiance wavelength range [{rad_min}, {rad_max}] nm extends beyond "
+                        f"reference range [{ref_min}, {ref_max}] nm. "
+                        f"Provide a fill_value for out-of-range wavelengths, or ensure the "
+                        f"reference covers the full radiance range."
+                    )
+                interp_kwargs = {"fill_value": fill_value, "bounds_error": False}
+            else:
+                interp_kwargs = {}
 
             reference = reference.interp(
-                {wavelength_dim: radiance[wavelength_dim]}, method="linear"
+                {wavelength_dim: radiance[wavelength_dim]},
+                method="linear",
+                kwargs=interp_kwargs,
             )
 
     if set(radiance.dims) - set(reference.dims):
