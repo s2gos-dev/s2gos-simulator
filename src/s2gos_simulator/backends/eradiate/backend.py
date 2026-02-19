@@ -13,9 +13,9 @@ from upath import UPath
 
 from .atmosphere_builder import AtmosphereBuilder
 from .constants import VALID_ERADIATE_MODES
+from .eradiate_translator import EradiateTranslator
 from .geometry_utils import GeometryUtils
 from .result_processor import ResultProcessor
-from .sensor_translator import SensorTranslator
 from .surface_builder import SurfaceBuilder
 from ..base import SimulationBackend
 from ...bhr_processor import BHRProcessor
@@ -80,7 +80,7 @@ class EradiateBackend(SimulationBackend):
         self.geometry_utils = GeometryUtils()
         self.atmosphere_builder = AtmosphereBuilder()
         self.surface_builder = SurfaceBuilder()
-        self.sensor_translator = SensorTranslator(
+        self.eradiate_translator = EradiateTranslator(
             simulation_config, self.geometry_utils
         )
         self.result_processor = ResultProcessor(simulation_config)
@@ -371,7 +371,7 @@ class EradiateBackend(SimulationBackend):
             raw_dataset = experiment.results[measure_id]
             raw_dataset.attrs["output_dir"] = str(output_dir)
 
-            sensor_config = self.sensor_translator.get_sensor_by_id(measure_id)
+            sensor_config = self.eradiate_translator.get_sensor_by_id(measure_id)
             if sensor_config:
                 post_processed_dataset = self.sensor_processor.process_sensor_result(
                     raw_dataset, sensor_config
@@ -526,7 +526,7 @@ class EradiateBackend(SimulationBackend):
             raw_dataset.attrs["output_dir"] = str(output_dir)
 
             # Post-process with sensor processor (apply Gaussian SRF if configured)
-            sensor_config = self.sensor_translator.get_sensor_by_id(measure_id)
+            sensor_config = self.eradiate_translator.get_sensor_by_id(measure_id)
             if sensor_config:
                 post_processed_dataset = self.sensor_processor.process_sensor_result(
                     raw_dataset, sensor_config
@@ -646,11 +646,14 @@ class EradiateBackend(SimulationBackend):
         else:
             atmosphere_obj = atmosphere  # None for BRF
 
-        illumination = self.sensor_translator.translate_illumination()
+        illumination = self.eradiate_translator.translate_illumination()
 
         if measures is None:
-            measures = self.sensor_translator.translate_sensors(
-                scene_description, scene_dir, include_irradiance_measures, sensor_ids,
+            measures = self.eradiate_translator.translate_sensors(
+                scene_description,
+                scene_dir,
+                include_irradiance_measures,
+                sensor_ids,
                 irradiance_disk_coords=irradiance_disk_coords,
             )
 
@@ -925,12 +928,12 @@ class EradiateBackend(SimulationBackend):
                 and measurement.radiance_sensor_id is None
             ):
                 radiance_sensor = (
-                    self.sensor_translator.generate_radiance_sensor_for_hdrf(
+                    self.eradiate_translator.generate_radiance_sensor_for_hdrf(
                         measurement
                     )
                 )
                 irradiance_measurement = (
-                    self.sensor_translator.generate_irradiance_measurement_for_hdrf(
+                    self.eradiate_translator.generate_irradiance_measurement_for_hdrf(
                         measurement
                     )
                 )
@@ -951,11 +954,13 @@ class EradiateBackend(SimulationBackend):
                 isinstance(measurement, HCRFConfig)
                 and measurement.radiance_sensor_id is None
             ):
-                camera_sensor = self.sensor_translator.generate_camera_sensor_for_hcrf(
-                    measurement
+                camera_sensor = (
+                    self.eradiate_translator.generate_camera_sensor_for_hcrf(
+                        measurement
+                    )
                 )
                 irradiance_measurement = (
-                    self.sensor_translator.generate_irradiance_measurement_for_hcrf(
+                    self.eradiate_translator.generate_irradiance_measurement_for_hcrf(
                         measurement
                     )
                 )
@@ -978,7 +983,9 @@ class EradiateBackend(SimulationBackend):
             ):
                 # BRF only needs radiance sensor (no irradiance - uses TOA from results)
                 radiance_sensor = (
-                    self.sensor_translator.generate_radiance_sensor_for_brf(measurement)
+                    self.eradiate_translator.generate_radiance_sensor_for_brf(
+                        measurement
+                    )
                 )
 
                 self.simulation_config.sensors.append(radiance_sensor)

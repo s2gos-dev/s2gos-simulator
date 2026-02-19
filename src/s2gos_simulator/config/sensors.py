@@ -5,13 +5,13 @@ from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from .spectral import SpectralRegion, SpectralResponse, WavelengthGrid, SRFType
+from .spectral import SpectralRegion, SpectralResponse, SRFType, WavelengthGrid
 from .viewing import (
-    AngularViewing,
     AngularFromOriginViewing,
-    LookAtViewing,
-    HemisphericalViewing,
+    AngularViewing,
     DistantViewing,
+    HemisphericalViewing,
+    LookAtViewing,
     ViewingType,
 )
 
@@ -244,7 +244,7 @@ class BaseSensor(BaseModel):
 
 
 class SatelliteSensor(BaseSensor):
-    """Satellite sensor configuration with strong validation."""
+    """Satellite sensor configuration."""
 
     platform_type: Literal[PlatformType.SATELLITE] = PlatformType.SATELLITE
     viewing: AngularViewing

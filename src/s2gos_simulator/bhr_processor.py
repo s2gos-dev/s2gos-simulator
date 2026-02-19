@@ -261,7 +261,7 @@ class BHRProcessor:
                 # Step 1: Surface simulation
                 logger.info("  Step 1: Running surface radiosity simulation...")
                 surface_measure = (
-                    self.backend.sensor_translator.create_distant_flux_measure(
+                    self.backend.eradiate_translator.create_distant_flux_measure(
                         bhr_config, target_coords, is_reference=False
                     )
                 )
@@ -288,7 +288,7 @@ class BHRProcessor:
                 )
 
                 ref_measure = (
-                    self.backend.sensor_translator.create_distant_flux_measure(
+                    self.backend.eradiate_translator.create_distant_flux_measure(
                         bhr_config, disk_coords, is_reference=True
                     )
                 )

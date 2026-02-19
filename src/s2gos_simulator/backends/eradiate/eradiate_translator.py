@@ -58,8 +58,11 @@ class _AssetTransform(NamedTuple):
     scale: float
 
 
-class SensorTranslator:
-    """Translator for sensors, measurements, and derived quantities."""
+class EradiateTranslator:
+    """
+    Translator from simulation config to Eraidate format
+    for illumination, sensors, measurements, and derived quantities.
+    """
 
     def __init__(self, simulation_config, geometry_utils):
         """Initialize sensor translator.
