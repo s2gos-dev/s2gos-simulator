@@ -47,13 +47,12 @@ class ProcessingConfig(BaseModel):
 
 class SimulationConfig(BaseModel):
     """
-    Comprehensive simulation configuration containing everything needed to run a simulation.
+    Comprehensive simulation configuration containing everything needed to set up a simulation.
 
     This single configuration class includes:
     - Sensor definitions for all platforms
     - Illumination settings
-    - Measurement types and processing levels
-    - Noise modeling and validation
+    - Measurement types
     """
 
     # Metadata
