@@ -389,7 +389,7 @@ class HCRFConfig(BaseModel):
     Two modes:
 
     1. Reference mode: Specify radiance_sensor_id + irradiance_measurement_id
-    2. Auto-generation mode: Specify camera geometry, backend creates sensor + measurement
+    2. Auto-generation mode: Specify camera geometry, backend creates a sensor + irradiance measurement.
     """
 
     type: Literal["hcrf"] = Field(
@@ -418,6 +418,13 @@ class HCRFConfig(BaseModel):
     )
     film_resolution: Optional[Tuple[int, int]] = Field(
         None, description="Camera resolution (auto-generation)"
+    )
+    location: Optional[HemisphericalMeasurementLocation] = Field(
+        None,
+        description="Location for the reference irradiance measurement (auto-generation)",
+    )
+    srf: Optional[SRFType] = Field(
+        None, description="Spectral response function for auto-generated sensors"
     )
     reference_height_offset_m: Optional[float] = Field(
         None,
@@ -450,6 +457,8 @@ class HCRFConfig(BaseModel):
         if has_autogen:
             if not self.platform_type:
                 raise ValueError("Auto-generation mode requires 'platform_type'")
+            if not self.location:
+                raise ValueError("Auto-generation mode requires 'location'")
             if not self.film_resolution:
                 raise ValueError("Auto-generation mode requires 'film_resolution'")
             if self.reference_height_offset_m is None:

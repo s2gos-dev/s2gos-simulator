@@ -155,39 +155,27 @@ class GroundInstrumentType(str, Enum):
     RADIANCEMETER = "radiancemeter"
 
 
-class SRFPostProcessingConfig(BaseModel):
-    """Base configuration for SRF post-processing pipeline steps.
+class PostProcessingOptions(BaseModel):
+    """Post-processing pipeline options for ground sensors.
 
-    FWHM is expressed on sensor.srf (SpectralResponse with spectral_regions),
-    not here. This class controls which pipeline steps to execute.
+    Controls spatial averaging, SRF convolution, circular FOV mask, and RGB output.
     """
 
     apply_srf: bool = Field(default=True, description="Apply Gaussian SRF convolution")
     spatial_averaging: bool = Field(
-        default=True, description="Average over spatial dimensions (x_index, y_index)"
+        default=False, description="Average over spatial dimensions (x_index, y_index)"
     )
     spatial_statistic: Literal["mean", "median"] = Field(
         default="mean", description="Statistic for spatial averaging"
     )
-
-
-class HypstarPostProcessingConfig(SRFPostProcessingConfig):
-    """Post-processing configuration for HYPSTAR sensor.
-
-    Example:
-        # Basic usage (simulation wavelengths, SRF from sensor.srf)
-        config = HypstarPostProcessingConfig()
-    """
-
     apply_circular_mask: bool = Field(
-        default=True,
+        default=False,
         description=(
             "Apply circular FOV mask before spatial averaging. "
             "Pixels outside the circular FOV are set to NaN and excluded. "
-            "Disable only for backwards compatibility testing."
+            "Enable for HYPSTAR-style circular aperture sensors."
         ),
     )
-
     generate_rgb_image: bool = Field(
         default=False,
         description=(
@@ -196,12 +184,10 @@ class HypstarPostProcessingConfig(SRFPostProcessingConfig):
             "Image saved as {sensor_id}_rgb.png in output directory."
         ),
     )
-
     rgb_wavelengths: Tuple[float, float, float] = Field(
         default=(660.0, 550.0, 440.0),
         description="Target wavelengths (nm) for RGB channels (red, green, blue)",
     )
-
     rgb_brightness_factor: float = Field(
         default=1.8,
         gt=0.0,
@@ -239,18 +225,32 @@ class BaseSensor(BaseModel):
         ["radiance"],
         description="List of radiative quantities to be produced by this sensor configuration",
     )
-    samples_per_pixel: int = Field(64, ge=1, description="Number of Monte Carlo samples per pixel")
-    noise_model: Optional[Dict[str, Any]] = Field(None, description="Noise model configuration")
+    samples_per_pixel: int = Field(
+        64, ge=1, description="Number of Monte Carlo samples per pixel"
+    )
+    noise_model: Optional[Dict[str, Any]] = Field(
+        None, description="Noise model configuration"
+    )
 
 
 class SatelliteSensor(BaseSensor):
     """Satellite sensor configuration."""
 
-    platform_type: Literal[PlatformType.SATELLITE] = Field(PlatformType.SATELLITE, description="Platform type (always 'satellite')")
-    viewing: AngularViewing = Field(..., description="Viewing geometry (zenith/azimuth angles)")
-    platform: SatellitePlatform = Field(..., description="Satellite platform identifier")
-    instrument: SatelliteInstrument = Field(..., description="Satellite instrument identifier")
-    band: str = Field(..., description="Band identifier (validated against instrument-specific enum)")
+    platform_type: Literal[PlatformType.SATELLITE] = Field(
+        PlatformType.SATELLITE, description="Platform type (always 'satellite')"
+    )
+    viewing: AngularViewing = Field(
+        ..., description="Viewing geometry (zenith/azimuth angles)"
+    )
+    platform: SatellitePlatform = Field(
+        ..., description="Satellite platform identifier"
+    )
+    instrument: SatelliteInstrument = Field(
+        ..., description="Satellite instrument identifier"
+    )
+    band: str = Field(
+        ..., description="Band identifier (validated against instrument-specific enum)"
+    )
     film_resolution: Tuple[int, int] = Field(
         ..., description="Pixel grid dimensions (width, height) for 2D imaging"
     )
@@ -366,11 +366,20 @@ class SatelliteSensor(BaseSensor):
 class UAVSensor(BaseSensor):
     """UAV sensor configuration."""
 
-    platform_type: Literal[PlatformType.UAV] = Field(PlatformType.UAV, description="Platform type (always 'uav')")
+    platform_type: Literal[PlatformType.UAV] = Field(
+        PlatformType.UAV, description="Platform type (always 'uav')"
+    )
     instrument: UAVInstrumentType = Field(..., description="UAV instrument type")
-    viewing: Union[LookAtViewing, AngularFromOriginViewing] = Field(..., description="Viewing geometry")
-    fov: Optional[float] = Field(None, description="Field of view in degrees (required for perspective_camera)")
-    resolution: Optional[List[int]] = Field(None, description="Film resolution [width, height] (required for perspective_camera)")
+    viewing: Union[LookAtViewing, AngularFromOriginViewing] = Field(
+        ..., description="Viewing geometry"
+    )
+    fov: Optional[float] = Field(
+        None, description="Field of view in degrees (required for perspective_camera)"
+    )
+    resolution: Optional[List[int]] = Field(
+        None,
+        description="Film resolution [width, height] (required for perspective_camera)",
+    )
 
     @model_validator(mode="after")
     def validate_instrument_config(self):
@@ -411,7 +420,9 @@ class UAVSensor(BaseSensor):
 class GroundSensor(BaseSensor):
     """Ground sensor configuration."""
 
-    platform_type: Literal[PlatformType.GROUND] = Field(PlatformType.GROUND, description="Platform type (always 'ground')")
+    platform_type: Literal[PlatformType.GROUND] = Field(
+        PlatformType.GROUND, description="Platform type (always 'ground')"
+    )
     instrument: GroundInstrumentType = Field(..., description="Ground instrument type")
     viewing: Union[
         LookAtViewing, AngularFromOriginViewing, HemisphericalViewing, DistantViewing
@@ -424,9 +435,9 @@ class GroundSensor(BaseSensor):
         None,
         description="Film resolution [width, height] (for camera-like instruments: HYPSTAR, perspective_camera, dhp_camera)",
     )
-    hypstar_post_processing: Optional[HypstarPostProcessingConfig] = Field(
+    post_processing: Optional[PostProcessingOptions] = Field(
         None,
-        description="HYPSTAR-specific post-processing (auto-enabled for HYPSTAR instrument)",
+        description="Post-processing pipeline options (spatial averaging, SRF, circular mask, etc.)",
     )
 
     @model_validator(mode="before")
@@ -453,10 +464,10 @@ class GroundSensor(BaseSensor):
                 )
                 data["resolution"] = [32, 32]
 
-            if data.get("hypstar_post_processing") is None:
-                data[
-                    "hypstar_post_processing"
-                ] = {}  # Pydantic will convert dict to Config object
+            if data.get("post_processing") is None:
+                data["post_processing"] = PostProcessingOptions(
+                    apply_circular_mask=True
+                )
 
             if data.get("srf") is None:
                 data["srf"] = SpectralResponse(
@@ -659,7 +670,10 @@ def create_hypstar_sensor(
         output_grid=output_grid,
     )
 
-    kwargs.setdefault("hypstar_post_processing", HypstarPostProcessingConfig())
+    kwargs.setdefault(
+        "post_processing",
+        PostProcessingOptions(apply_circular_mask=True, spatial_averaging=True),
+    )
 
     return GroundSensor(
         id=sensor_id,

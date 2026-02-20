@@ -1,6 +1,4 @@
 import math
-from unittest.mock import MagicMock
-
 import numpy as np
 import pytest
 
@@ -14,6 +12,7 @@ from s2gos_simulator.config import (
     DirectionalIllumination,
     GroundInstrumentType,
     GroundSensor,
+    HCRFConfig,
     HDRFConfig,
     HemisphericalMeasurementLocation,
     IrradianceConfig,
@@ -345,22 +344,36 @@ class TestSensorAutoGeneration:
         assert irr.id == "hdrf_irradiance_my_hdrf"
         assert irr.location.srf == srf
 
-    def test_generate_camera_sensor_for_hcrf(self, translator):
-        # HCRFConfig is missing 'srf' field, so use MagicMock to isolate method
-        hcrf_config = MagicMock()
-        hcrf_config.id = "my_hcrf"
-        hcrf_config.viewing = LookAtViewing(
-            origin=[0.0, 0.0, 1.0],
-            target=[0.0, 0.0, 0.0],
-            terrain_relative_height=False,
+    def _make_hcrf_config(self, srf=None):
+        return HCRFConfig(
+            id="my_hcrf",
+            viewing=LookAtViewing(
+                origin=[0.0, 0.0, 1.0],
+                target=[0.0, 0.0, 0.0],
+                terrain_relative_height=False,
+            ),
+            fov=70.0,
+            film_resolution=(512, 512),
+            platform_type="ground",
+            location=HemisphericalMeasurementLocation(
+                target_x=0.0, target_y=0.0, target_z=0.0, terrain_relative_height=False
+            ),
+            reference_height_offset_m=0.1,
+            srf=srf,
         )
-        hcrf_config.fov = 70.0
-        hcrf_config.film_resolution = (512, 512)
-        hcrf_config.srf = None
-        hcrf_config.samples_per_pixel = 64
+
+    def test_generate_camera_sensor_for_hcrf(self, translator):
+        hcrf_config = self._make_hcrf_config()
         sensor = translator.generate_camera_sensor_for_hcrf(hcrf_config)
         assert sensor.id == "hcrf_camera_my_hcrf"
         assert sensor.instrument == GroundInstrumentType.PERSPECTIVE_CAMERA
+
+    def test_generate_irradiance_measurement_for_hcrf(self, translator):
+        srf = SpectralResponse(type="uniform", wmin=400.0, wmax=900.0)
+        hcrf_config = self._make_hcrf_config(srf=srf)
+        irr = translator.generate_irradiance_measurement_for_hcrf(hcrf_config)
+        assert irr.id == "hcrf_irradiance_my_hcrf"
+        assert irr.location.srf == srf
 
     def test_generate_radiance_sensor_for_brf(self, translator):
         brf = self._make_brf_config()

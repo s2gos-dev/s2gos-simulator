@@ -10,7 +10,7 @@ class SensorProcessor:
     """Unified sensor processor for all sensor types.
 
     Pipeline is driven entirely by config data (sensor.srf and
-    sensor.hypstar_post_processing). No instrument-specific branches.
+    sensor.post_processing). No instrument-specific branches.
     """
 
     def __init__(self, simulation_config):
@@ -48,7 +48,7 @@ class SensorProcessor:
         from ..config import SpectralResponse
 
         radiance = dataset["radiance"]
-        pp = getattr(sensor, "hypstar_post_processing", None)
+        pp = getattr(sensor, "post_processing", None)
 
         if pp is not None:
             if getattr(pp, "apply_circular_mask", False):

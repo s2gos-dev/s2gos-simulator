@@ -33,6 +33,7 @@ from ...config import (
     UAVInstrumentType,
     UAVSensor,
 )
+from ...config.sensors import PostProcessingOptions
 
 try:
     from eradiate.units import unit_registry as ureg
@@ -871,6 +872,7 @@ class EradiateTranslator:
             resolution=hcrf_config.film_resolution,
             srf=hcrf_config.srf,
             samples_per_pixel=hcrf_config.samples_per_pixel or 1000,
+            post_processing=PostProcessingOptions(spatial_averaging=True),
         )
 
     def generate_irradiance_measurement_for_hcrf(
