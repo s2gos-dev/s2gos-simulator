@@ -394,11 +394,6 @@ class EradiateBackend(SimulationBackend):
                 if success:
                     all_saved_results[measure_id] = raw_dataset
 
-        if kwargs.get("plot_image", False):
-            self.result_processor.create_rgb_visualization(
-                experiment, output_dir, kwargs.get("id_to_plot", "rgb_camera")
-            )
-
         logger.debug(f"Successfully saved results: {list(all_saved_results.keys())}")
 
         return all_saved_results

@@ -380,6 +380,10 @@ class UAVSensor(BaseSensor):
         None,
         description="Film resolution [width, height] (required for perspective_camera)",
     )
+    post_processing: Optional[PostProcessingOptions] = Field(
+        None,
+        description="Post-processing pipeline options (spatial averaging, SRF, circular mask, etc.)",
+    )
 
     @model_validator(mode="after")
     def validate_instrument_config(self):

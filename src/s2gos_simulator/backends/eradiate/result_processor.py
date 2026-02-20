@@ -1,24 +1,14 @@
 """Result processing and visualization for Eradiate backend."""
 
 import logging
-from typing import Any, Dict, List, Union
+from typing import Any, Dict
 
-import numpy as np
 import xarray as xr
-from PIL import Image
 from s2gos_utils.io.paths import mkdir, open_file
 from upath import UPath
 
-from .constants import RGB_WAVELENGTHS_NM
 
 logger = logging.getLogger(__name__)
-
-try:
-    from eradiate.xarray.interp import dataarray_to_rgb
-
-    ERADIATE_AVAILABLE = True
-except ImportError:
-    ERADIATE_AVAILABLE = False
 
 
 class ResultProcessor:
@@ -97,128 +87,6 @@ class ResultProcessor:
             "measurement_types": [m.type for m in self.simulation_config.measurements],
             "illumination_type": self.simulation_config.illumination.type,
         }
-
-    def create_rgb_visualization(
-        self, experiment, output_dir: UPath, id_to_plot: Union[str, List[str]]
-    ):
-        """Create RGB visualization from camera results.
-
-        Args:
-            experiment: Eradiate experiment with results
-            output_dir: Output directory for images
-            id_to_plot: Sensor ID(s) to visualize. Can be a single string or list of strings.
-        """
-        if isinstance(id_to_plot, str):
-            sensor_ids = [id_to_plot]
-        else:
-            sensor_ids = id_to_plot
-
-        if len(sensor_ids) > 1:
-            logger.info(
-                f"Creating RGB visualizations for {len(sensor_ids)} sensor(s)..."
-            )
-
-        for sensor_id in sensor_ids:
-            try:
-                if sensor_id not in experiment.results:
-                    logger.warning(
-                        f"Warning: Sensor '{sensor_id}' not found in results"
-                    )
-                    continue
-
-                sensor_data = experiment.results[sensor_id]
-
-                if "radiance" in sensor_data:
-                    radiance_data = sensor_data["radiance"]
-                    if (
-                        "x_index" in radiance_data.dims
-                        and "y_index" in radiance_data.dims
-                    ):
-                        wavelengths = radiance_data.coords["w"].values
-
-                        if len(wavelengths) >= 3:
-                            target_wavelengths = RGB_WAVELENGTHS_NM
-                            actual_wavelengths = [
-                                radiance_data.sel(w=w_val, method="nearest").w.item()
-                                for w_val in target_wavelengths
-                            ]
-                            corrected_channels = [
-                                ("w", w_val) for w_val in actual_wavelengths
-                            ]
-
-                            img = (
-                                dataarray_to_rgb(
-                                    radiance_data,
-                                    channels=corrected_channels,
-                                    normalize=False,
-                                )
-                                * 1.8
-                            )
-                            img = np.clip(img, 0, 1)
-                            rgb_output = (
-                                output_dir
-                                / f"{self.simulation_config.name}_{sensor_id}_rgb.png"
-                            )
-                            plt_img = (img * 255).astype(np.uint8)
-                            logger.info(f"RGB image saved to: {rgb_output}")
-                        else:
-                            img_data = radiance_data.squeeze().values
-                            img_normalized = (img_data - img_data.min()) / (
-                                img_data.max() - img_data.min()
-                            )
-                            img_normalized = np.clip(img_normalized, 0, 1)
-                            plt_img = (img_normalized * 255).astype(np.uint8)
-                            rgb_output = (
-                                output_dir
-                                / f"{self.simulation_config.name}_{sensor_id}_grayscale.png"
-                            )
-                            logger.info(f"Grayscale image saved to: {rgb_output}")
-
-                        rgb_image = Image.fromarray(plt_img)
-                        with open_file(rgb_output, "wb") as f:
-                            rgb_image.save(f, format="PNG")
-
-                    else:
-                        spectral_output = (
-                            output_dir
-                            / f"{self.simulation_config.name}_{sensor_id}_spectrum.png"
-                        )
-                        self.plot_spectral_data(radiance_data, spectral_output)
-                        logge.info(f"Spectral data plot saved to: {spectral_output}")
-
-            except Exception as e:
-                logger.warning(
-                    f"Warning: Could not create visualization for {sensor_id}: {e}"
-                )
-
-    def plot_spectral_data(self, radiance_data, output_path: UPath):
-        """Plot spectral data for point sensors.
-
-        Args:
-            radiance_data: xarray DataArray with spectral radiance
-            output_path: Path for output PNG file
-        """
-        try:
-            import matplotlib.pyplot as plt
-
-            wavelengths = radiance_data.coords["w"].values
-            radiance_values = radiance_data.values
-
-            plt.figure(figsize=(10, 6))
-            plt.plot(wavelengths, radiance_values, "b-", linewidth=2)
-            plt.xlabel("Wavelength (nm)")
-            plt.ylabel("Radiance")
-            plt.title("Spectral Radiance")
-            plt.grid(True, alpha=0.3)
-            plt.tight_layout()
-            with open_file(output_path, "wb") as f:
-                plt.savefig(f, format="png", dpi=150, bbox_inches="tight")
-            plt.close()
-
-        except ImportError:
-            logger.warning("Warning: matplotlib not available for spectral plotting")
-        except Exception as e:
-            logger.warning(f"Warning: Could not create spectral plot: {e}")
 
     def create_hdrf_visualizations(
         self, hdrf_results: Dict[str, xr.Dataset], output_dir: UPath
