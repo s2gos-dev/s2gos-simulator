@@ -34,6 +34,7 @@ class WavelengthGrid(BaseModel):
     """Configuration for output wavelength grid.
 
     Supports three modes:
+
     1. Regular grid: wmin_nm/wmax_nm/step_nm (Spectral Sampling Interval)
     2. Explicit wavelengths: list of specific wavelengths
     3. From file: extract wavelengths from external NetCDF/CSV file
@@ -49,7 +50,9 @@ class WavelengthGrid(BaseModel):
         WavelengthGrid(mode="from_file", file_path="reference.nc", wavelength_variable="wavelength")
     """
 
-    mode: Literal["regular", "explicit", "from_file"] = "regular"
+    mode: Literal["regular", "explicit", "from_file"] = Field(
+        "regular", description="Grid mode: 'regular', 'explicit', or 'from_file'"
+    )
 
     # Regular grid mode
     wmin_nm: Optional[float] = Field(None, ge=0, description="Minimum wavelength (nm)")
@@ -119,10 +122,11 @@ class SpectralResponse(BaseModel):
     """Spectral response function configuration.
 
     Supports multiple SRF types:
-    - delta: Discrete wavelength points -> Eradiate's multi_delta
-    - uniform: Wavelength range (wmin, wmax) -> Eradiate's uniform
-    - dataset: String ID for predefined SRFs -> Eradiate's internal database
-    - gaussian: Gaussian SRF with configurable FWHM (for hyperspectral instruments)
+
+    - **delta**: Discrete wavelength points → Eradiate's multi_delta
+    - **uniform**: Wavelength range (wmin, wmax) → Eradiate's uniform
+    - **dataset**: String ID for predefined SRFs → Eradiate's internal database
+    - **gaussian**: Gaussian SRF with configurable FWHM (for hyperspectral instruments)
 
     Gaussian SRF Example (CHIME-like):
         SpectralResponse(
@@ -136,7 +140,9 @@ class SpectralResponse(BaseModel):
         )
     """
 
-    type: Literal["delta", "uniform", "dataset", "gaussian"] = "delta"
+    type: Literal["delta", "uniform", "dataset", "gaussian"] = Field(
+        "delta", description="SRF type: 'delta', 'uniform', 'dataset', or 'gaussian'"
+    )
 
     # Delta SRF fields
     wavelengths: Optional[List[float]] = Field(

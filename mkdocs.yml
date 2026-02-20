@@ -40,8 +40,7 @@ plugins:
             merge_init_into_class: true
             group_by_category: true
             show_category_heading: true
-            # show_attributes: true
-            filters: ["!^_"]
+            show_attributes: true
             extensions:
               - griffe_pydantic
 

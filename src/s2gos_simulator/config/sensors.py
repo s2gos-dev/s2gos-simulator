@@ -215,8 +215,8 @@ class BaseSensor(BaseModel):
     id: Optional[str] = Field(
         None, description="Unique sensor identifier (auto-generated if not provided)"
     )
-    platform_type: PlatformType
-    viewing: ViewingType
+    platform_type: PlatformType = Field(..., description="Platform type identifier")
+    viewing: ViewingType = Field(..., description="Viewing geometry configuration")
     srf: Optional[SRFType] = Field(None, description="Spectral response function")
 
     @field_validator("srf", mode="before")
@@ -239,18 +239,18 @@ class BaseSensor(BaseModel):
         ["radiance"],
         description="List of radiative quantities to be produced by this sensor configuration",
     )
-    samples_per_pixel: int = Field(64, ge=1)
-    noise_model: Optional[Dict[str, Any]] = Field(None)
+    samples_per_pixel: int = Field(64, ge=1, description="Number of Monte Carlo samples per pixel")
+    noise_model: Optional[Dict[str, Any]] = Field(None, description="Noise model configuration")
 
 
 class SatelliteSensor(BaseSensor):
     """Satellite sensor configuration."""
 
-    platform_type: Literal[PlatformType.SATELLITE] = PlatformType.SATELLITE
-    viewing: AngularViewing
-    platform: SatellitePlatform
-    instrument: SatelliteInstrument
-    band: str
+    platform_type: Literal[PlatformType.SATELLITE] = Field(PlatformType.SATELLITE, description="Platform type (always 'satellite')")
+    viewing: AngularViewing = Field(..., description="Viewing geometry (zenith/azimuth angles)")
+    platform: SatellitePlatform = Field(..., description="Satellite platform identifier")
+    instrument: SatelliteInstrument = Field(..., description="Satellite instrument identifier")
+    band: str = Field(..., description="Band identifier (validated against instrument-specific enum)")
     film_resolution: Tuple[int, int] = Field(
         ..., description="Pixel grid dimensions (width, height) for 2D imaging"
     )
@@ -364,11 +364,13 @@ class SatelliteSensor(BaseSensor):
 
 
 class UAVSensor(BaseSensor):
-    platform_type: Literal[PlatformType.UAV] = PlatformType.UAV
-    instrument: UAVInstrumentType
-    viewing: Union[LookAtViewing, AngularFromOriginViewing]
-    fov: Optional[float] = Field(None)
-    resolution: Optional[List[int]] = Field(None)
+    """UAV sensor configuration."""
+
+    platform_type: Literal[PlatformType.UAV] = Field(PlatformType.UAV, description="Platform type (always 'uav')")
+    instrument: UAVInstrumentType = Field(..., description="UAV instrument type")
+    viewing: Union[LookAtViewing, AngularFromOriginViewing] = Field(..., description="Viewing geometry")
+    fov: Optional[float] = Field(None, description="Field of view in degrees (required for perspective_camera)")
+    resolution: Optional[List[int]] = Field(None, description="Film resolution [width, height] (required for perspective_camera)")
 
     @model_validator(mode="after")
     def validate_instrument_config(self):
@@ -407,11 +409,13 @@ class UAVSensor(BaseSensor):
 
 
 class GroundSensor(BaseSensor):
-    platform_type: Literal[PlatformType.GROUND] = PlatformType.GROUND
-    instrument: GroundInstrumentType
+    """Ground sensor configuration."""
+
+    platform_type: Literal[PlatformType.GROUND] = Field(PlatformType.GROUND, description="Platform type (always 'ground')")
+    instrument: GroundInstrumentType = Field(..., description="Ground instrument type")
     viewing: Union[
         LookAtViewing, AngularFromOriginViewing, HemisphericalViewing, DistantViewing
-    ]
+    ] = Field(..., description="Viewing geometry")
     fov: Optional[float] = Field(
         None,
         description="Field of view in degrees (for camera-like instruments: HYPSTAR, perspective_camera, dhp_camera)",

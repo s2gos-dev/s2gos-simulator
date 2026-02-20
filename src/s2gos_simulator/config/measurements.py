@@ -136,34 +136,33 @@ class IrradianceConfig(BaseModel):
 
     Measures downward hemispheric irradiance at bottom-of-atmosphere using the
     white reference disk technique:
-    - Places a small white Lambertian disk (ρ=1.0) at the measurement location
-    - Measures upward radiance from the disk
-    - Converts to downward irradiance: E = π × L
-    - Averages samples to reduce Monte Carlo noise
 
-    This is the fundamental irradiance measurement used as reference for HDRF.
+    - Places a small white Lambertian disk (ρ=1.0) at the measurement location
+    - By sampling the incident radiance we indirectly get the total incident flux (E = π × L)
     """
 
-    type: Literal["irradiance"] = "irradiance"
+    type: Literal["irradiance"] = Field(
+        "irradiance", description="Measurement type (always 'irradiance')"
+    )
     id: str = Field(description="Unique identifier for this irradiance measurement")
-    location: HemisphericalMeasurementLocation
-    samples_per_pixel: int = 512
+    location: HemisphericalMeasurementLocation = Field(
+        ..., description="Geographic or scene location for the measurement"
+    )
+    samples_per_pixel: int = Field(512, description="Monte Carlo samples per pixel")
 
 
 class BRFConfig(BaseModel):
-    """Configuration for BRF measurement WITHOUT atmosphere.
+    """Configuration for BRF measurement **without** atmosphere.
 
     BRF = (π × L) / (E_toa × cos(SZA))
 
-    Uses TOA irradiance directly from simulation results (no white disk needed).
-    Requires simulation to run with atmosphere=None.
-
     Two modes:
+
     1. Reference mode: Specify radiance_sensor_id (sensor already exists)
-    2. Auto-generation mode: Specify location + viewing, backend creates sensors
+    2. Auto-generation mode: Specify viewing, backend creates sensors
     """
 
-    type: Literal["brf"] = "brf"
+    type: Literal["brf"] = Field("brf", description="Measurement type (always 'brf')")
     id: str = Field(description="Unique identifier")
 
     # Mode 1: Reference existing sensor
@@ -178,8 +177,12 @@ class BRFConfig(BaseModel):
 
     # Optional overrides
     srf: Optional[SRFType] = Field(None, description="Spectral response function")
-    samples_per_pixel: int = Field(default=1024, ge=1)
-    terrain_relative_height: bool = Field(default=True)
+    samples_per_pixel: int = Field(
+        default=1024, ge=1, description="Monte Carlo samples per pixel"
+    )
+    terrain_relative_height: bool = Field(
+        default=True, description="Interpret z-coordinates as terrain-relative offsets"
+    )
 
     @model_validator(mode="after")
     def validate_brf_mode(self):
@@ -204,14 +207,15 @@ class BRFConfig(BaseModel):
 class HDRFConfig(BaseModel):
     """Configuration for Hemispherical-Directional Reflectance Factor (HDRF).
 
-    HDRF measures the ratio of radiance to BOA irradiance.
+    HDRF = π × L_r / E_i
 
-    Two modes:
     1. Reference mode: Specify radiance_sensor_id + irradiance_measurement_id
-    2. Auto-generation mode: Specify viewing geometry, backend creates sensor + measurement
+    2. Auto-generation mode: Specify instrument + location/viewing, backend creates sensor + measurement
     """
 
-    type: Literal["hdrf"] = "hdrf"
+    type: Literal["hdrf"] = Field(
+        "hdrf", description="Measurement type (always 'hdrf')"
+    )
     id: str = Field(description="Unique identifier")
 
     # Mode 1: Reference existing sensor + measurement
@@ -332,7 +336,7 @@ class BasePixelMeasurementConfig(BaseModel):
 
 
 class PixelHDRFConfig(BasePixelMeasurementConfig):
-    """BOA HDRF measurement at satellite pixel centers (WITH atmosphere).
+    """BOA HDRF measurement at satellite pixel.
 
     HDRF = π × L_surface / E_boa
 
@@ -340,11 +344,13 @@ class PixelHDRFConfig(BasePixelMeasurementConfig):
     Requires 2N simulations for N pixels (irradiance + radiance per pixel).
     """
 
-    type: Literal["pixel_hdrf"] = "pixel_hdrf"
+    type: Literal["pixel_hdrf"] = Field(
+        "pixel_hdrf", description="Measurement type (always 'pixel_hdrf')"
+    )
 
 
 class PixelBRFConfig(BasePixelMeasurementConfig):
-    """BRF measurement at satellite pixel centers (NO atmosphere).
+    """BRF measurement at satellite pixel (no atmosphere).
 
     BRF = (π × L) / (E_toa × cos(SZA))
 
@@ -353,11 +359,13 @@ class PixelBRFConfig(BasePixelMeasurementConfig):
     Requires N simulations for N pixels (radiance only).
     """
 
-    type: Literal["pixel_brf"] = "pixel_brf"
+    type: Literal["pixel_brf"] = Field(
+        "pixel_brf", description="Measurement type (always 'pixel_brf')"
+    )
 
 
 class PixelBHRConfig(BasePixelMeasurementConfig):
-    """BHR measurement at satellite pixel centers (WITH atmosphere).
+    """BHR measurement at satellite pixel.
 
     BHR = radiosity_surface / radiosity_white_reference
 
@@ -365,7 +373,9 @@ class PixelBHRConfig(BasePixelMeasurementConfig):
     Requires 2N simulations for N pixels (surface + reference per pixel).
     """
 
-    type: Literal["pixel_bhr"] = "pixel_bhr"
+    type: Literal["pixel_bhr"] = Field(
+        "pixel_bhr", description="Measurement type (always 'pixel_bhr')"
+    )
     reference_height_offset_m: float = Field(
         default=0.1,
         ge=0.0,
@@ -377,11 +387,14 @@ class HCRFConfig(BaseModel):
     """Configuration for Hemispherical-Conical Reflectance Factor (HCRF).
 
     Two modes:
+
     1. Reference mode: Specify radiance_sensor_id + irradiance_measurement_id
     2. Auto-generation mode: Specify camera geometry, backend creates sensor + measurement
     """
 
-    type: Literal["hcrf"] = "hcrf"
+    type: Literal["hcrf"] = Field(
+        "hcrf", description="Measurement type (always 'hcrf')"
+    )
     id: str = Field(description="Unique identifier")
 
     # Mode 1: Reference existing sensor + measurement
@@ -457,7 +470,7 @@ class BHRConfig(HemisphericalMeasurementLocation):
     reference patch (ρ=1.0 Lambertian disk) at the same location.
     """
 
-    type: Literal["bhr"] = "bhr"
+    type: Literal["bhr"] = Field("bhr", description="Measurement type (always 'bhr')")
     id: Optional[str] = Field(
         None,
         description="Unique identifier",

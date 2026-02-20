@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal, Optional
+from typing import Literal
 
 from pydantic import BaseModel, Field
-from skyfield.api import load, wgs84
-
 from s2gos_utils.io.resolver import resolver
+from skyfield.api import load, wgs84
 
 
 class Illumination(BaseModel):
@@ -17,9 +16,9 @@ class Illumination(BaseModel):
 
 
 class DirectionalIllumination(Illumination):
-    """Directional illumination (e.g., sun)."""
+    """Directional illumination."""
 
-    type: Literal["directional"] = "directional"
+    type: Literal["directional"] = Field("directional", description="Illumination type (always 'directional')")
     zenith: float = Field(
         30.0, ge=0.0, le=90.0, description="Solar zenith angle in degrees"
     )
@@ -52,7 +51,7 @@ class DirectionalIllumination(Illumination):
             A new DirectionalIllumination instance with corrected zenith and azimuth.
 
         Raises:
-            ValueError: If the sun is below the horizon at the specified time.
+            ValueError: Likely the sun is below the horizon at the specified time.
         """
         # Load timescale and ephemeris
         ts = load.timescale()
@@ -98,5 +97,5 @@ class DirectionalIllumination(Illumination):
 class ConstantIllumination(Illumination):
     """Constant uniform illumination."""
 
-    type: Literal["constant"] = "constant"
+    type: Literal["constant"] = Field("constant", description="Illumination type (always 'constant')")
     radiance: float = Field(1.0, gt=0.0, description="Constant radiance value")

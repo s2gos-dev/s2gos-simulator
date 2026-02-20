@@ -12,13 +12,12 @@ class BaseViewing(BaseModel):
 
 
 class AngularViewing(BaseViewing):
-    """
-    Viewing defined by zenith and azimuth angles, typically relative to a target.
+    """Viewing defined by zenith and azimuth angles, typically relative to a target.
 
-    This is ideal for distant sensors (satellites)
+    This is ideal for distant sensors (satellites).
     """
 
-    type: Literal["angular"] = "angular"
+    type: Literal["angular"] = Field("angular", description="Viewing type (always 'angular')")
     zenith: float = Field(
         0.0,
         ge=0.0,
@@ -33,14 +32,13 @@ class AngularViewing(BaseViewing):
 
 
 class AngularFromOriginViewing(BaseViewing):
-    """
-    Viewing defined by an origin position and zenith/azimuth angles from that origin.
+    """Viewing defined by an origin position and zenith/azimuth angles from that origin.
 
     This is ideal for radiancemeters and cameras where you know the sensor position
     and want to specify the pointing direction with angles.
     """
 
-    type: Literal["angular_from_origin"] = "angular_from_origin"
+    type: Literal["angular_from_origin"] = Field("angular_from_origin", description="Viewing type (always 'angular_from_origin')")
     origin: List[float] = Field(
         ..., description="3D sensor position [x, y, z] in meters"
     )
@@ -75,14 +73,13 @@ class AngularFromOriginViewing(BaseViewing):
 
 
 class LookAtViewing(BaseViewing):
-    """
-    Viewing defined by an origin and a target point.
+    """Viewing defined by an origin and a target point.
 
     This is ideal for UAVs or perspective cameras where the exact position
     of the sensor and its target are known.
     """
 
-    type: Literal["directional"] = "directional"
+    type: Literal["directional"] = Field("directional", description="Viewing type (always 'directional')")
     origin: List[float] = Field(
         ..., description="3D sensor position [x, y, z] in meters"
     )
@@ -118,7 +115,7 @@ class RectangleTarget(BaseModel):
     leaving a specific rectangular area.
     """
 
-    type: Literal["rectangle"] = "rectangle"
+    type: Literal["rectangle"] = Field("rectangle", description="Target type (always 'rectangle')")
     xmin: float = Field(..., description="Minimum X coordinate in meters")
     xmax: float = Field(..., description="Maximum X coordinate in meters")
     ymin: float = Field(..., description="Minimum Y coordinate in meters")
@@ -168,11 +165,11 @@ class DistantViewing(BaseViewing):
     Uses Eradiate's MultiDistantMeasure with rectangular targets for
     pixel-level BRF measurements.
 
-    The sensor looks in the direction specified by `direction` (default: [0, 0, 1]
+    The sensor looks in the direction specified by ``direction`` (default: [0, 0, 1]
     meaning looking down from above / nadir view).
     """
 
-    type: Literal["distant"] = "distant"
+    type: Literal["distant"] = Field("distant", description="Viewing type (always 'distant')")
 
     target: Optional[Union[List[float], RectangleTarget]] = Field(
         default=None,
@@ -209,11 +206,9 @@ class DistantViewing(BaseViewing):
 
 
 class HemisphericalViewing(BaseViewing):
-    """
-    Viewing that covers the entire upper or lower hemisphere.
-    """
+    """Viewing that covers the entire upper or lower hemisphere."""
 
-    type: Literal["hemispherical"] = "hemispherical"
+    type: Literal["hemispherical"] = Field("hemispherical", description="Viewing type (always 'hemispherical')")
     origin: List[float] = Field(
         ..., description="3D sensor position [x, y, z] in meters."
     )
