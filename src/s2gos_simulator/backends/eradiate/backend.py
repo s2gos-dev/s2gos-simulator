@@ -810,7 +810,6 @@ class EradiateBackend(SimulationBackend):
                     target_z=target_z,
                 )
                 self.simulation_config.measurements.append(expanded)
-                print(f"{self.simulation_config.measurements=}")
                 logger.debug(
                     f"Expanded pixel ({row}, {col}) -> {type(expanded).__name__} "
                     f"'{expanded.id}' at scene ({x:.1f}, {y:.1f}, z={target_z:.1f})"
