@@ -214,6 +214,7 @@ class BHRProcessor:
         scene_description: SceneDescription,
         scene_dir: UPath,
         output_dir: UPath,
+        radiosity_dir: UPath | None = None,
     ) -> Dict[str, xr.Dataset]:
         """Execute all BHR measurements.
 
@@ -238,6 +239,8 @@ class BHRProcessor:
         logger.info("=" * 60)
 
         mkdir(output_dir)
+        if radiosity_dir is not None:
+            mkdir(radiosity_dir)
         results = {}
         bhr_configs = self.get_bhr_configs()
 
@@ -281,6 +284,14 @@ class BHRProcessor:
                     f"  Surface radiosity: mean={float(surface_radiosity.mean()):.4e}"
                 )
 
+                if radiosity_dir is not None:
+                    surface_file = (
+                        radiosity_dir
+                        / f"{self.simulation_config.name}_{bhr_config.id}_surface.zarr"
+                    )
+                    surface_result.to_zarr(surface_file, mode="w")
+                    logger.info(f"  Saved surface radiosity → {surface_file.name}")
+
                 # Step 2: White reference simulation
                 logger.info("  Step 2: Running white reference radiosity simulation...")
                 ref_scene, disk_coords = self.create_white_reference_scene(
@@ -305,6 +316,14 @@ class BHRProcessor:
                 logger.info(
                     f"  Reference radiosity: mean={float(reference_radiosity.mean()):.4e}"
                 )
+
+                if radiosity_dir is not None:
+                    reference_file = (
+                        radiosity_dir
+                        / f"{self.simulation_config.name}_{bhr_config.id}_reference.zarr"
+                    )
+                    ref_result.to_zarr(reference_file, mode="w")
+                    logger.info(f"  Saved reference radiosity → {reference_file.name}")
 
                 # Step 3: Compute BHR
                 logger.info("  Step 3: Computing BHR...")

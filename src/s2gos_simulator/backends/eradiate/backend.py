@@ -294,7 +294,8 @@ class EradiateBackend(SimulationBackend):
             bhr_results = bhr_proc.execute_bhr_measurements(
                 scene_description,
                 scene_dir,
-                output_dir / "bhr_results",
+                output_dir / "derived",
+                radiosity_dir=output_dir / "radiosity",
             )
             all_results.update(bhr_results)
 
@@ -446,7 +447,7 @@ class EradiateBackend(SimulationBackend):
 
         combined_results = {**sensor_results, **irr_results}
 
-        derived_output_dir = output_dir / "derived_results"
+        derived_output_dir = output_dir / "derived"
 
         derived_results = hdrf_processor.compute_h_reflectances(
             combined_results, derived_output_dir
@@ -509,7 +510,7 @@ class EradiateBackend(SimulationBackend):
 
         all_saved_results = {}
         radiance_output_dir = output_dir / "radiance"
-        brf_output_dir = output_dir / "brf_results"
+        brf_output_dir = output_dir / "derived"
 
         for i, measure in enumerate(experiment.measures):
             measure_id = getattr(measure, "id", f"measure_{i}")
@@ -809,6 +810,7 @@ class EradiateBackend(SimulationBackend):
                     target_z=target_z,
                 )
                 self.simulation_config.measurements.append(expanded)
+                print(f"{self.simulation_config.measurements=}")
                 logger.debug(
                     f"Expanded pixel ({row}, {col}) -> {type(expanded).__name__} "
                     f"'{expanded.id}' at scene ({x:.1f}, {y:.1f}, z={target_z:.1f})"
@@ -876,6 +878,13 @@ class EradiateBackend(SimulationBackend):
                 terrain_relative_height=False,
             )
         elif isinstance(pixel_config, PixelBHRConfig):
+            rectangle_target = RectangleTarget.from_center_and_size(
+                cx=x,
+                cy=y,
+                width=pixel_size_x,
+                height=pixel_size_y,
+                z=target_z,
+            )
             return BHRConfig(
                 id=f"{pixel_config.id}_r{row}_c{col}",
                 target_x=x,
@@ -886,6 +895,12 @@ class EradiateBackend(SimulationBackend):
                 srf=srf,
                 samples_per_pixel=pixel_config.samples_per_pixel,
                 reference_height_offset_m=pixel_config.reference_height_offset_m,
+                viewing=DistantViewing(
+                    target=rectangle_target,
+                    direction=[0, 0, 1],
+                    ray_offset=5.0,
+                    terrain_relative_height=False,  # z already computed
+                ),
             )
         else:  # PixelBRFConfig
             rectangle_target = RectangleTarget.from_center_and_size(

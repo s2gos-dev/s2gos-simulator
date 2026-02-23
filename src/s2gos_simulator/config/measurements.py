@@ -489,6 +489,13 @@ class BHRConfig(HemisphericalMeasurementLocation):
         ge=0.0,
         description="Height offset for white reference patch above surface (meters)",
     )
+    viewing: Optional[DistantViewing] = Field(
+        None,
+        description="Optional viewing geometry for pixel-level surface radiosity. "
+                    "When set (e.g. DistantViewing with RectangleTarget), the "
+                    "distant_flux surface measure uses this target instead of the "
+                    "point coordinates.",
+    )
 
 
 MeasurementConfig = Annotated[

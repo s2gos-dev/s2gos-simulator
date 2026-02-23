@@ -724,10 +724,32 @@ class EradiateTranslator:
             f"({x:.2f}, {y:.2f}, {z:.2f}) m, spp={spp}"
         )
 
+        if (
+            not is_reference
+            and bhr_config.viewing is not None
+            and isinstance(bhr_config.viewing.target, RectangleTarget)
+        ):
+            rect = bhr_config.viewing.target
+            target = {
+                "type": "rectangle",
+                "xmin": rect.xmin,
+                "xmax": rect.xmax,
+                "ymin": rect.ymin,
+                "ymax": rect.ymax,
+                "z": rect.z,
+            }
+            logger.debug(
+                f"distant_flux '{measure_id}' using rectangle target: "
+                f"x=[{rect.xmin:.1f}, {rect.xmax:.1f}], "
+                f"y=[{rect.ymin:.1f}, {rect.ymax:.1f}], z={rect.z:.1f}"
+            )
+        else:
+            target = [x, y, z]
+
         return {
             "type": "distant_flux",
             "id": sanitize_sensor_id(measure_id),
-            "target": [x, y, z],
+            "target": target,
             "direction": [
                 0,
                 0,
