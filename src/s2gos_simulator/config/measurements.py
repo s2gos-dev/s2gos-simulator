@@ -492,9 +492,9 @@ class BHRConfig(HemisphericalMeasurementLocation):
     viewing: Optional[DistantViewing] = Field(
         None,
         description="Optional viewing geometry for pixel-level surface radiosity. "
-                    "When set (e.g. DistantViewing with RectangleTarget), the "
-                    "distant_flux surface measure uses this target instead of the "
-                    "point coordinates.",
+        "When set (e.g. DistantViewing with RectangleTarget), the "
+        "distant_flux surface measure uses this target instead of the "
+        "point coordinates.",
     )
 
 

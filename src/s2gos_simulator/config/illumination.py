@@ -18,7 +18,9 @@ class Illumination(BaseModel):
 class DirectionalIllumination(Illumination):
     """Directional illumination."""
 
-    type: Literal["directional"] = Field("directional", description="Illumination type (always 'directional')")
+    type: Literal["directional"] = Field(
+        "directional", description="Illumination type (always 'directional')"
+    )
     zenith: float = Field(
         30.0, ge=0.0, le=90.0, description="Solar zenith angle in degrees"
     )
@@ -97,5 +99,7 @@ class DirectionalIllumination(Illumination):
 class ConstantIllumination(Illumination):
     """Constant uniform illumination."""
 
-    type: Literal["constant"] = Field("constant", description="Illumination type (always 'constant')")
+    type: Literal["constant"] = Field(
+        "constant", description="Illumination type (always 'constant')"
+    )
     radiance: float = Field(1.0, gt=0.0, description="Constant radiance value")

@@ -143,7 +143,6 @@ class TestExpandPixelMeasurementConfigs:
         brf_configs = [m for m in measurements if isinstance(m, BRFConfig)]
         assert len(brf_configs) == 1
         target = brf_configs[0].viewing.target
-        print(f"{target=}")
         assert target.xmax - target.xmin == pytest.approx(10.0)
         assert target.ymax - target.ymin == pytest.approx(10.0)
         assert target.xmin == pytest.approx(-500.0)

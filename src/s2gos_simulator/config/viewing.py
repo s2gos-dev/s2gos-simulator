@@ -17,7 +17,9 @@ class AngularViewing(BaseViewing):
     This is ideal for distant sensors (satellites).
     """
 
-    type: Literal["angular"] = Field("angular", description="Viewing type (always 'angular')")
+    type: Literal["angular"] = Field(
+        "angular", description="Viewing type (always 'angular')"
+    )
     zenith: float = Field(
         0.0,
         ge=0.0,
@@ -38,7 +40,9 @@ class AngularFromOriginViewing(BaseViewing):
     and want to specify the pointing direction with angles.
     """
 
-    type: Literal["angular_from_origin"] = Field("angular_from_origin", description="Viewing type (always 'angular_from_origin')")
+    type: Literal["angular_from_origin"] = Field(
+        "angular_from_origin", description="Viewing type (always 'angular_from_origin')"
+    )
     origin: List[float] = Field(
         ..., description="3D sensor position [x, y, z] in meters"
     )
@@ -79,7 +83,9 @@ class LookAtViewing(BaseViewing):
     of the sensor and its target are known.
     """
 
-    type: Literal["directional"] = Field("directional", description="Viewing type (always 'directional')")
+    type: Literal["directional"] = Field(
+        "directional", description="Viewing type (always 'directional')"
+    )
     origin: List[float] = Field(
         ..., description="3D sensor position [x, y, z] in meters"
     )
@@ -115,7 +121,9 @@ class RectangleTarget(BaseModel):
     leaving a specific rectangular area.
     """
 
-    type: Literal["rectangle"] = Field("rectangle", description="Target type (always 'rectangle')")
+    type: Literal["rectangle"] = Field(
+        "rectangle", description="Target type (always 'rectangle')"
+    )
     xmin: float = Field(..., description="Minimum X coordinate in meters")
     xmax: float = Field(..., description="Maximum X coordinate in meters")
     ymin: float = Field(..., description="Minimum Y coordinate in meters")
@@ -169,7 +177,9 @@ class DistantViewing(BaseViewing):
     meaning looking down from above / nadir view).
     """
 
-    type: Literal["distant"] = Field("distant", description="Viewing type (always 'distant')")
+    type: Literal["distant"] = Field(
+        "distant", description="Viewing type (always 'distant')"
+    )
 
     target: Optional[Union[List[float], RectangleTarget]] = Field(
         default=None,
@@ -208,7 +218,9 @@ class DistantViewing(BaseViewing):
 class HemisphericalViewing(BaseViewing):
     """Viewing that covers the entire upper or lower hemisphere."""
 
-    type: Literal["hemispherical"] = Field("hemispherical", description="Viewing type (always 'hemispherical')")
+    type: Literal["hemispherical"] = Field(
+        "hemispherical", description="Viewing type (always 'hemispherical')"
+    )
     origin: List[float] = Field(
         ..., description="3D sensor position [x, y, z] in meters."
     )

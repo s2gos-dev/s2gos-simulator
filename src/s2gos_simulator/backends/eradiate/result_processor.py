@@ -4,9 +4,8 @@ import logging
 from typing import Any, Dict
 
 import xarray as xr
-from s2gos_utils.io.paths import mkdir, open_file
+from s2gos_utils.io.paths import mkdir
 from upath import UPath
-
 
 logger = logging.getLogger(__name__)
 

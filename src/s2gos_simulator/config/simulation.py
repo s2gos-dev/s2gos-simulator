@@ -61,7 +61,9 @@ class SimulationConfig(BaseModel):
     )
     name: str = Field(..., description="Simulation name")
     description: Optional[str] = Field(None, description="Simulation description")
-    created_at: datetime = Field(default_factory=datetime.now, description="Creation timestamp (auto-populated)")
+    created_at: datetime = Field(
+        default_factory=datetime.now, description="Creation timestamp (auto-populated)"
+    )
 
     # Core configuration
     illumination: Union[DirectionalIllumination, ConstantIllumination] = Field(
